@@ -1,5 +1,6 @@
 // Post-translation quality review Lambda
-// Layered QA: structural checks, entity preservation, back-translation, then AI correction
+// Layered QA: structural checks, entity preservation, back-translation,
+// artifact detection, terminology verification, then AI correction
 // Stores full audit trail in DynamoDB
 
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -21,6 +22,7 @@ const translate = new TranslateClient({ region: process.env.AWS_REGION });
 const MODEL_ID = "anthropic.claude-3-7-sonnet-20250219-v1:0";
 const JOB_TABLE_NAME = process.env.JOB_TABLE_NAME || "";
 const CONTENT_BUCKET = process.env.CONTENT_BUCKET || "";
+const GLOSSARY_KEY = process.env.GLOSSARY_KEY || "docs/afc_terminology_aws.csv";
 
 // ============================================================
 // LAYER 1: Structural Integrity Check (free, instant)
@@ -150,6 +152,239 @@ function calculateBLEU(reference: string, candidate: string): number {
 }
 
 // ============================================================
+// LAYER 3.5: Artifact & Hallucination Detection (free, instant)
+// ============================================================
+interface Artifact {
+	type: string;
+	count: number;
+	severity: "high" | "medium" | "low";
+	examples?: string[];
+}
+
+interface ArtifactReport {
+	artifacts: Artifact[];
+	artifactDensity: number;
+	needsReview: boolean;
+	pass: boolean;
+}
+
+function detectArtifacts(translatedText: string, sourceText: string, targetLang: string): ArtifactReport {
+	const artifacts: Artifact[] = [];
+
+	// 1. Untranslated English fragments (if target != en)
+	if (targetLang !== "en") {
+		// Common English function words that should NOT appear in a non-English translation
+		const englishFunctionWords = /\b(the|is|are|was|were|have|has|been|will|would|should|could|this|that|these|those|which|where|when|because|however|therefore|although|furthermore|nevertheless|meanwhile|regarding|concerning|approximately|subsequently)\b/gi;
+		const matches = translatedText.match(englishFunctionWords) || [];
+		// Allow a small number (some proper nouns or quoted terms may contain English)
+		if (matches.length > 8) {
+			artifacts.push({
+				type: "untranslated_fragments",
+				count: matches.length,
+				severity: "high",
+				examples: [...new Set(matches.map(m => m.toLowerCase()))].slice(0, 5),
+			});
+		}
+	}
+
+	// 2. Repeated phrases (hallucination indicator)
+	const sentences = translatedText.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 20);
+	const seen = new Map<string, number>();
+	for (const s of sentences) {
+		const normalized = s.toLowerCase().substring(0, 100); // Normalize for comparison
+		seen.set(normalized, (seen.get(normalized) || 0) + 1);
+	}
+	const repeats = [...seen.entries()].filter(([_, count]) => count > 3);
+	if (repeats.length > 0) {
+		artifacts.push({
+			type: "repeated_phrases",
+			count: repeats.reduce((sum, [_, c]) => sum + c - 1, 0), // Count excess repetitions
+			severity: "high",
+			examples: repeats.map(([phrase]) => phrase.substring(0, 50)).slice(0, 3),
+		});
+	}
+
+	// 3. Encoding artifacts (mojibake patterns)
+	const mojibakePattern = /Ã[\x80-\xBF]|â€[™""|˜œ¦¢]|Â[\xa0-\xff]|Ã‚|Ãƒ|â‚¬/g;
+	const mojibakeMatches = translatedText.match(mojibakePattern) || [];
+	if (mojibakeMatches.length > 3) {
+		artifacts.push({
+			type: "encoding_errors",
+			count: mojibakeMatches.length,
+			severity: "medium",
+			examples: [...new Set(mojibakeMatches)].slice(0, 5),
+		});
+	}
+
+	// 4. Length anomaly per segment (hallucination or truncation indicator)
+	const sourceSegments = sourceText.split(/\n\n+/).filter(s => s.trim().length > 10);
+	const targetSegments = translatedText.split(/\n\n+/).filter(s => s.trim().length > 10);
+	let anomalies = 0;
+	const anomalyExamples: string[] = [];
+	for (let i = 0; i < Math.min(sourceSegments.length, targetSegments.length); i++) {
+		const ratio = targetSegments[i].length / Math.max(sourceSegments[i].length, 1);
+		if (ratio > 2.5 || ratio < 0.3) {
+			anomalies++;
+			if (anomalyExamples.length < 3) {
+				anomalyExamples.push(`Segment ${i + 1}: ratio ${ratio.toFixed(1)}x`);
+			}
+		}
+	}
+	if (anomalies > 0) {
+		artifacts.push({
+			type: "length_anomaly",
+			count: anomalies,
+			severity: "medium",
+			examples: anomalyExamples,
+		});
+	}
+
+	// 5. Consecutive identical words (stuttering/loop artifact)
+	const stutterPattern = /(\b\w{4,}\b)(\s+\1){3,}/gi;
+	const stutterMatches = translatedText.match(stutterPattern) || [];
+	if (stutterMatches.length > 0) {
+		artifacts.push({
+			type: "word_repetition_loop",
+			count: stutterMatches.length,
+			severity: "high",
+			examples: stutterMatches.map(m => m.substring(0, 40)).slice(0, 3),
+		});
+	}
+
+	// Calculate density
+	const totalSegments = Math.max(sourceSegments.length, 1);
+	const totalArtifactInstances = artifacts.reduce((sum, a) => sum + a.count, 0);
+	const artifactDensity = totalArtifactInstances / totalSegments;
+
+	return {
+		artifacts,
+		artifactDensity: parseFloat(artifactDensity.toFixed(3)),
+		needsReview: artifactDensity > 0.1,
+		pass: artifactDensity <= 0.1,
+	};
+}
+
+// ============================================================
+// LAYER 3.6: Terminology Verification (free, instant after S3 load)
+// ============================================================
+interface TerminologyViolation {
+	sourceTerm: string;
+	expectedTranslation: string;
+	found: boolean;
+	context?: string;
+}
+
+interface TerminologyGap {
+	sourceTerm: string;
+	targetLang: string;
+}
+
+interface TerminologyReport {
+	violations: TerminologyViolation[];
+	gaps: TerminologyGap[];
+	totalTermsChecked: number;
+	complianceRate: number;
+	pass: boolean;
+}
+
+// Cache glossary in Lambda memory (cold start only loads once)
+let glossaryCache: Map<string, Record<string, string>> | null = null;
+let glossaryLangCodes: string[] = [];
+
+async function loadGlossary(): Promise<Map<string, Record<string, string>>> {
+	if (glossaryCache) return glossaryCache;
+
+	try {
+		const csvText = await getS3Text(CONTENT_BUCKET, GLOSSARY_KEY);
+		const lines = csvText.split("\n").filter(l => l.trim().length > 0);
+		if (lines.length < 2) {
+			console.log("Glossary empty or malformed");
+			glossaryCache = new Map();
+			return glossaryCache;
+		}
+
+		// Parse header to get language codes
+		glossaryLangCodes = lines[0].split(",").map(h => h.trim().toLowerCase());
+
+		// Parse terms: key = English term (lowercase), value = { langCode: translation }
+		glossaryCache = new Map();
+		for (let i = 1; i < lines.length; i++) {
+			const cols = lines[i].split(",").map(c => c.trim());
+			const enTerm = cols[0];
+			if (!enTerm) continue;
+
+			const translations: Record<string, string> = {};
+			for (let j = 1; j < cols.length && j < glossaryLangCodes.length; j++) {
+				if (cols[j] && cols[j].length > 0) {
+					translations[glossaryLangCodes[j]] = cols[j];
+				}
+			}
+			glossaryCache.set(enTerm.toLowerCase(), translations);
+		}
+
+		console.log(`Glossary loaded: ${glossaryCache.size} terms, languages: ${glossaryLangCodes.join(", ")}`);
+		return glossaryCache;
+	} catch (err) {
+		console.error("Failed to load glossary:", err);
+		glossaryCache = new Map();
+		return glossaryCache;
+	}
+}
+
+function verifyTerminology(
+	sourceText: string,
+	translatedText: string,
+	targetLang: string,
+	glossary: Map<string, Record<string, string>>
+): TerminologyReport {
+	const violations: TerminologyViolation[] = [];
+	const gaps: TerminologyGap[] = [];
+	let totalTermsChecked = 0;
+
+	const sourceTextLower = sourceText.toLowerCase();
+	const translatedTextLower = translatedText.toLowerCase();
+
+	for (const [enTerm, translations] of glossary) {
+		// Check if the English term appears in the source text
+		if (!sourceTextLower.includes(enTerm)) continue;
+
+		totalTermsChecked++;
+
+		// Check if we have a translation for this target language
+		const expectedTranslation = translations[targetLang];
+		if (!expectedTranslation) {
+			// Gap: no translation available for this language
+			gaps.push({ sourceTerm: enTerm, targetLang });
+			continue;
+		}
+
+		// Check if the correct translation appears in the output
+		const found = translatedTextLower.includes(expectedTranslation.toLowerCase());
+		if (!found) {
+			// Find what might have been used instead (context around where the term should be)
+			violations.push({
+				sourceTerm: enTerm,
+				expectedTranslation,
+				found: false,
+			});
+		}
+	}
+
+	const compliantTerms = totalTermsChecked - violations.length - gaps.length;
+	const complianceRate = totalTermsChecked > 0
+		? parseFloat(((compliantTerms / totalTermsChecked) * 100).toFixed(1))
+		: 100;
+
+	return {
+		violations,
+		gaps,
+		totalTermsChecked,
+		complianceRate,
+		pass: violations.length === 0,
+	};
+}
+
+// ============================================================
 // LAYER 3: Back-Translation with BLEU Score
 // ============================================================
 async function backTranslationCheck(translatedText: string, originalText: string, sourceLang: string, targetLang: string) {
@@ -218,7 +453,7 @@ Check for ALL of the following. Even ONE instance of categories 1-3 should drop 
 2. DANGEROUS MISTRANSLATIONS (Critical): Words translated in a way that changes the safeguarding meaning (e.g., "neglect" becoming "unimportant", "account" becoming "digital account", "target" in wrong context). Score penalty: -20 per instance.
 3. LITERAL WORD-FOR-WORD FAILURES (Serious): Phrases translated word-by-word that no native speaker would write (e.g., English word order forced onto the target language). Score penalty: -10 per instance.
 4. GRAMMAR & SYNTAX ERRORS (Moderate): Broken grammar, wrong gender, wrong verb conjugation. Score penalty: -5 per instance.
-5. TONE & REGISTER FAILURES (Moderate): Translation lacks the formal/legal tone required for professional safeguarding documents. Score penalty: -5 per instance.
+5. TONE & REGISTER FAILURES (Moderate): Translation lacks the formal/legal tone required for professional safeguarding documents. Uses informal address forms (tu/tú/sen instead of vous/usted/siz), colloquialisms, or inappropriate register for official documents. Score penalty: -5 per instance.
 6. UNTRANSLATED CONTENT: English words or phrases left untranslated. Score penalty: -3 per instance.
 
 SCORING GUIDE:
@@ -244,7 +479,7 @@ Return ONLY valid JSON in this exact format:
 CRITICAL: Response must be parseable by JSON.parse(). Keep all string values short and on one line. No arrays, no nested objects.
 Verdict thresholds: score >= 85 = fit_for_purpose, score 50-84 = needs_correction, score < 50 = unsafe.`;
 
-const CORRECTION_PROMPT = `You are an expert translator specialising in UK children's services and safeguarding documents. The following translation has quality issues. Apply corrections using the original source text as your reference.
+const BASE_CORRECTION_PROMPT = `You are an expert translator specialising in UK children's services and safeguarding documents. The following translation has quality issues. Apply corrections using the original source text as your reference.
 
 KNOWN MACHINE TRANSLATION FAILURES TO WATCH FOR:
 - "coaching" in safeguarding context means witness tampering/priming (NOT sports training or military drilling)
@@ -266,6 +501,62 @@ Rules:
 
 Return ONLY the corrected full translation text. No explanations, no preamble.`;
 
+function buildCorrectionPrompt(
+	terminologyViolations: TerminologyViolation[],
+	artifactReport: ArtifactReport | null,
+	registerProfile: RegisterProfile | null,
+	targetLang: string
+): string {
+	let prompt = BASE_CORRECTION_PROMPT;
+
+	// Add register requirements
+	if (registerProfile) {
+		prompt += `\n\nREGISTER REQUIREMENTS (${registerProfile.language}):
+- Formality: ${registerProfile.formality}
+- Honorifics: ${registerProfile.honorifics}
+- Tone: ${registerProfile.toneGuidance}
+- Cultural notes: ${registerProfile.culturalNotes}
+Ensure the ENTIRE translation maintains this register consistently. Any informal language in a formal document is a critical error.`;
+	} else {
+		prompt += `\n\nREGISTER REQUIREMENTS: Use formal, professional register throughout. This is an official government safeguarding document.`;
+	}
+
+	// Add terminology corrections as non-negotiable instructions
+	if (terminologyViolations.length > 0) {
+		prompt += `\n\nTERMINOLOGY CORRECTIONS REQUIRED (NON-NEGOTIABLE):
+The following terms MUST use the exact translations specified. These are domain-specific safeguarding terms where incorrect translation can have legal consequences.`;
+		for (const v of terminologyViolations.slice(0, 20)) {
+			prompt += `\n- "${v.sourceTerm}" MUST be translated as "${v.expectedTranslation}"`;
+		}
+	}
+
+	// Add artifact removal instructions
+	if (artifactReport && artifactReport.artifacts.length > 0) {
+		prompt += `\n\nARTIFACTS TO REMOVE:`;
+		for (const a of artifactReport.artifacts) {
+			switch (a.type) {
+				case "untranslated_fragments":
+					prompt += `\n- Remove untranslated English words/phrases (${a.count} detected). Translate them properly.`;
+					break;
+				case "repeated_phrases":
+					prompt += `\n- Remove repeated/duplicated sentences (${a.count} excess repetitions detected). Keep only one instance.`;
+					break;
+				case "encoding_errors":
+					prompt += `\n- Fix encoding errors/mojibake characters (${a.count} detected). Replace with correct characters.`;
+					break;
+				case "length_anomaly":
+					prompt += `\n- Check segments with abnormal length ratios (${a.count} detected). Ensure no content is hallucinated or truncated.`;
+					break;
+				case "word_repetition_loop":
+					prompt += `\n- Remove word repetition loops (${a.count} detected). These are translation engine artifacts.`;
+					break;
+			}
+		}
+	}
+
+	return prompt;
+}
+
 async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
 	const body = JSON.stringify({
 		anthropic_version: "bedrock-2023-05-31",
@@ -285,6 +576,69 @@ async function callClaude(systemPrompt: string, userMessage: string): Promise<st
 
 	const responseBody = JSON.parse(new TextDecoder().decode(response.body));
 	return responseBody.content[0].text;
+}
+
+// ============================================================
+// Titan Embeddings for semantic similarity
+// ============================================================
+async function getEmbedding(text: string): Promise<number[]> {
+	const body = JSON.stringify({
+		inputText: text.substring(0, 8000), // Titan limit
+	});
+
+	const response = await bedrock.send(
+		new InvokeModelCommand({
+			modelId: "amazon.titan-embed-text-v2:0",
+			contentType: "application/json",
+			accept: "application/json",
+			body: new TextEncoder().encode(body),
+		})
+	);
+
+	const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+	return responseBody.embedding;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+	if (a.length !== b.length || a.length === 0) return 0;
+	let dotProduct = 0;
+	let normA = 0;
+	let normB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dotProduct += a[i] * b[i];
+		normA += a[i] * a[i];
+		normB += b[i] * b[i];
+	}
+	const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+	return denominator === 0 ? 0 : dotProduct / denominator;
+}
+
+// ============================================================
+// Register profile loading for correction prompt
+// ============================================================
+interface RegisterProfile {
+	language: string;
+	formality: string;
+	honorifics: string;
+	toneGuidance: string;
+	culturalNotes: string;
+}
+
+let registerProfilesCache: Record<string, RegisterProfile> | null = null;
+const REGISTER_PROFILES_KEY = process.env.REGISTER_PROFILES_KEY || "docs/register_profiles.json";
+
+async function loadRegisterProfiles(): Promise<Record<string, RegisterProfile>> {
+	if (registerProfilesCache) return registerProfilesCache;
+	try {
+		const jsonText = await getS3Text(CONTENT_BUCKET, REGISTER_PROFILES_KEY);
+		registerProfilesCache = JSON.parse(jsonText);
+		console.log(`Register profiles loaded: ${Object.keys(registerProfilesCache!).length} languages`);
+		return registerProfilesCache!;
+	} catch (err) {
+		console.error("Failed to load register profiles:", err);
+		registerProfilesCache = {};
+		return registerProfilesCache;
+	}
 }
 
 async function getS3Text(bucket: string, key: string): Promise<string> {
@@ -326,12 +680,13 @@ export const handler = async (event: any) => {
 
 		// Get the translateKey map from DynamoDB to find output file paths
 		let translateKeyMap: Record<string, string> = {};
+		let bedrockTranslateKeyMap: Record<string, string> = {};
 		try {
 			const dbResponse = await dynamodb.send(
 				new GetItemCommand({
 					TableName: JOB_TABLE_NAME,
 					Key: { id: { S: jobId } },
-					ProjectionExpression: "translateKey, jobName, s3PrefixToJobId",
+					ProjectionExpression: "translateKey, bedrockTranslateKey, jobName, s3PrefixToJobId",
 				})
 			);
 			console.log("DynamoDB response:", JSON.stringify(dbResponse.Item));
@@ -350,6 +705,13 @@ export const handler = async (event: any) => {
 				} else {
 					console.log("No translateKey found in DynamoDB item");
 				}
+			}
+
+			// Read Bedrock translation keys (parallel engine output)
+			const bedrockKeyStr = dbResponse.Item?.bedrockTranslateKey?.S;
+			if (bedrockKeyStr) {
+				bedrockTranslateKeyMap = JSON.parse(bedrockKeyStr);
+				console.log("bedrockTranslateKeyMap:", JSON.stringify(bedrockTranslateKeyMap));
 			}
 		} catch (err) {
 			console.error("Could not read translateKey from DynamoDB:", err);
@@ -393,7 +755,175 @@ export const handler = async (event: any) => {
 
 			// ===== LAYER 3: Back-Translation Similarity =====
 			const backTranslation = await backTranslationCheck(translatedText, sourceText, jobDetails.languageSource || "en", langCode);
-			console.log(`Layer 3 (Back-translation) for ${langCode}: ${backTranslation.pass ? "PASS" : "FAIL"} - ${backTranslation.details.similarity}%`);
+			console.log(`Layer 3 (Back-translation) for ${langCode}: ${backTranslation.pass ? "PASS" : "FAIL"} - BLEU: ${backTranslation.details.bleuScore}`);
+
+			// ===== LAYER 3.4: Multi-Engine Segment Comparison =====
+			// If Bedrock translation is available, compare and select best segments
+			let segmentComparisonResult: any = null;
+			const bedrockS3Uri = bedrockTranslateKeyMap[`lang${langCode}`];
+			if (bedrockS3Uri && typeof bedrockS3Uri === "string" && bedrockS3Uri.startsWith("s3://")) {
+				try {
+					const bedrockS3Path = bedrockS3Uri.replace(`s3://${CONTENT_BUCKET}/`, "");
+					const bedrockText = await getS3Text(CONTENT_BUCKET, bedrockS3Path);
+
+					if (bedrockText && bedrockText.length > 10) {
+						console.log(`Layer 3.4 (Segment Comparison) for ${langCode}: Bedrock output available (${bedrockText.length} chars)`);
+
+						// Compare at paragraph level
+						const awsSegments = translatedText.split(/\n\n+/).filter(s => s.trim().length > 10);
+						const bedrockSegments = bedrockText.split(/\n\n+/).filter(s => s.trim().length > 10);
+						const sourceSegments = sourceText.split(/\n\n+/).filter(s => s.trim().length > 10);
+
+						// Load glossary for terminology compliance scoring
+						const glossary = await loadGlossary();
+						let awsTermScore = 0;
+						let bedrockTermScore = 0;
+						const sourceTextLower = sourceText.toLowerCase();
+
+						for (const [enTerm, translations] of glossary) {
+							if (!sourceTextLower.includes(enTerm)) continue;
+							const expectedTerm = translations[langCode];
+							if (!expectedTerm) continue;
+							const expectedLower = expectedTerm.toLowerCase();
+							if (translatedText.toLowerCase().includes(expectedLower)) awsTermScore++;
+							if (bedrockText.toLowerCase().includes(expectedLower)) bedrockTermScore++;
+						}
+
+						// Segment-level comparison with Titan Embeddings
+						const minSegments = Math.min(awsSegments.length, bedrockSegments.length, sourceSegments.length);
+						const maxSegmentsToCompare = Math.min(minSegments, 20); // Limit to 20 segments for cost
+						let contestedCount = 0;
+						let agreedCount = 0;
+						const mergedSegments: string[] = [];
+						let usedEmbeddings = false;
+
+						try {
+							for (let i = 0; i < maxSegmentsToCompare; i++) {
+								const awsSeg = awsSegments[i];
+								const bedrockSeg = bedrockSegments[i];
+
+								// Get embeddings for both segments
+								const [awsEmb, bedrockEmb] = await Promise.all([
+									getEmbedding(awsSeg),
+									getEmbedding(bedrockSeg),
+								]);
+								usedEmbeddings = true;
+
+								const similarity = cosineSimilarity(awsEmb, bedrockEmb);
+
+								if (similarity >= 0.85) {
+									// Agreed — pick based on terminology compliance
+									agreedCount++;
+									// Check which segment has better term usage
+									let awsSegTerms = 0;
+									let bedrockSegTerms = 0;
+									for (const [enTerm, translations] of glossary) {
+										const expectedTerm = translations[langCode];
+										if (!expectedTerm) continue;
+										if (awsSeg.toLowerCase().includes(expectedTerm.toLowerCase())) awsSegTerms++;
+										if (bedrockSeg.toLowerCase().includes(expectedTerm.toLowerCase())) bedrockSegTerms++;
+									}
+									mergedSegments.push(bedrockSegTerms >= awsSegTerms ? bedrockSeg : awsSeg);
+								} else {
+									// Contested — synthesise from source
+									contestedCount++;
+									try {
+										const sourceSeg = sourceSegments[i] || "";
+										const synthesisPrompt = `You are resolving a translation disagreement. Two engines produced different translations for the same source segment. Produce the CORRECT translation by referring to the SOURCE TEXT as ground truth.
+
+SOURCE (${jobDetails.languageSource || "en"}):
+${sourceSeg}
+
+ENGINE A (AWS Translate):
+${awsSeg}
+
+ENGINE B (Claude):
+${bedrockSeg}
+
+Rules:
+- The source text is the ONLY authority on meaning
+- If one engine preserves meaning better, prefer it
+- If both have errors, produce a new translation from the source
+- Use formal, professional register appropriate for safeguarding documents
+- Preserve all dates, numbers, names, reference codes unchanged
+- Output ONLY the correct translation of this segment, nothing else`;
+
+										const synthesised = await callClaude(synthesisPrompt, "Produce the correct translation.");
+										mergedSegments.push(synthesised || bedrockSeg);
+									} catch (synthErr) {
+										// Fallback to Bedrock segment on synthesis failure
+										mergedSegments.push(bedrockSeg);
+									}
+								}
+							}
+
+							// Append remaining segments from the preferred engine
+							const preferBedrock = bedrockTermScore >= awsTermScore;
+							const remainingSource = preferBedrock ? bedrockSegments : awsSegments;
+							for (let i = maxSegmentsToCompare; i < remainingSource.length; i++) {
+								mergedSegments.push(remainingSource[i]);
+							}
+
+							// Assemble merged document
+							if (mergedSegments.length > 0) {
+								translatedText = mergedSegments.join("\n\n");
+								console.log(`Layer 3.4: Merged document assembled (${mergedSegments.length} segments, ${contestedCount} contested, ${agreedCount} agreed)`);
+							}
+						} catch (embErr) {
+							// Titan Embeddings failed — fall back to terminology-based selection
+							console.log(`Layer 3.4: Embeddings failed, falling back to terminology selection: ${embErr}`);
+							const preferBedrock = bedrockTermScore >= awsTermScore;
+							if (preferBedrock) {
+								translatedText = bedrockText;
+							}
+							usedEmbeddings = false;
+						}
+
+						const selectedEngine = bedrockTermScore >= awsTermScore ? "bedrock" : "aws_translate";
+						segmentComparisonResult = {
+							bedrockAvailable: true,
+							awsTermScore,
+							bedrockTermScore,
+							selectedEngine,
+							awsSegments: awsSegments.length,
+							bedrockSegments: bedrockSegments.length,
+							contestedSegments: contestedCount,
+							agreedSegments: agreedCount,
+							usedEmbeddings,
+							segmentsCompared: maxSegmentsToCompare,
+						};
+
+						console.log(`Layer 3.4: AWS term: ${awsTermScore}, Bedrock term: ${bedrockTermScore}, contested: ${contestedCount}, agreed: ${agreedCount}`);
+					} else {
+						console.log(`Layer 3.4: Bedrock output empty for ${langCode}, using AWS Translate`);
+						segmentComparisonResult = { bedrockAvailable: false, reason: "empty_output" };
+					}
+				} catch (err) {
+					console.log(`Layer 3.4: Could not read Bedrock output for ${langCode}: ${err}`);
+					segmentComparisonResult = { bedrockAvailable: false, reason: "read_error" };
+				}
+			} else {
+				console.log(`Layer 3.4: No Bedrock translation available for ${langCode}, using AWS Translate only`);
+				segmentComparisonResult = { bedrockAvailable: false, reason: "not_available" };
+			}
+
+			// ===== LAYER 3.5: Artifact & Hallucination Detection =====
+			const artifactReport = detectArtifacts(translatedText, sourceText, langCode);
+			console.log(`Layer 3.5 (Artifacts) for ${langCode}: ${artifactReport.pass ? "PASS" : "FAIL"} - density: ${artifactReport.artifactDensity}, artifacts: ${artifactReport.artifacts.length}`);
+			if (artifactReport.artifacts.length > 0) {
+				console.log(`  Artifact types: ${artifactReport.artifacts.map(a => `${a.type}(${a.count})`).join(", ")}`);
+			}
+
+			// ===== LAYER 3.6: Terminology Verification =====
+			const glossary = await loadGlossary();
+			const terminologyReport = verifyTerminology(sourceText, translatedText, langCode, glossary);
+			console.log(`Layer 3.6 (Terminology) for ${langCode}: ${terminologyReport.pass ? "PASS" : "FAIL"} - compliance: ${terminologyReport.complianceRate}%, violations: ${terminologyReport.violations.length}, gaps: ${terminologyReport.gaps.length}`);
+			if (terminologyReport.violations.length > 0) {
+				console.log(`  Violations: ${terminologyReport.violations.map(v => `"${v.sourceTerm}"`).join(", ")}`);
+			}
+			if (terminologyReport.gaps.length > 0) {
+				console.log(`  Gaps (no translation available): ${terminologyReport.gaps.map(g => `"${g.sourceTerm}"`).join(", ")}`);
+			}
 
 			// ===== LAYER 4: AI Review & Correction =====
 			console.log(`Layer 4 (AI Review) for ${langCode} (${translatedText.length} chars)...`);
@@ -436,12 +966,32 @@ export const handler = async (event: any) => {
 
 			const auditEntry: any = {
 				language: langCode,
+				pipelineVersion: "v2",
 				layers: {
 					structural: { pass: structural.pass, ...structural.details },
 					entityPreservation: { pass: entities.pass, ...entities.details },
 					backTranslation: { pass: backTranslation.pass, ...backTranslation.details },
+					segmentComparison: segmentComparisonResult,
+					artifactDetection: {
+						pass: artifactReport.pass,
+						artifactDensity: artifactReport.artifactDensity,
+						needsReview: artifactReport.needsReview,
+						artifacts: artifactReport.artifacts.map(a => ({ type: a.type, count: a.count, severity: a.severity })),
+					},
+					terminologyVerification: {
+						pass: terminologyReport.pass,
+						complianceRate: terminologyReport.complianceRate,
+						totalTermsChecked: terminologyReport.totalTermsChecked,
+						violationCount: terminologyReport.violations.length,
+						violations: terminologyReport.violations.slice(0, 10).map(v => ({
+							term: v.sourceTerm,
+							expected: v.expectedTranslation,
+						})),
+						gapCount: terminologyReport.gaps.length,
+						gaps: terminologyReport.gaps.slice(0, 10).map(g => g.sourceTerm),
+					},
 				},
-				allLayersPass: structural.pass && entities.pass && backTranslation.pass,
+				allLayersPass: structural.pass && entities.pass && backTranslation.pass && artifactReport.pass && terminologyReport.pass,
 				aiScore: reviewResult.score,
 				domain: reviewResult.domain || null,
 				summary: reviewResult.summary || null,
@@ -456,8 +1006,18 @@ export const handler = async (event: any) => {
 				console.log(`Score ${reviewResult.score} for ${langCode}, applying AI correction pass...`);
 
 				try {
+					// Build dynamic correction prompt with terminology violations, artifact info, and register profile
+					const registerProfiles = await loadRegisterProfiles();
+					const registerProfile = registerProfiles[langCode] || null;
+					const correctionPrompt = buildCorrectionPrompt(
+						terminologyReport.violations,
+						artifactReport,
+						registerProfile,
+						langCode
+					);
+
 					const correctionMessage = `[CURRENT TRANSLATION (${langCode})]\n${translatedText}\n\n[ORIGINAL SOURCE TEXT]\n${sourceText.substring(0, 15000)}\n\n[CORRECTION GUIDANCE]\n${reviewResult.correctionGuidance || "Review and improve the translation to ensure it reads naturally, preserves all meaning precisely, uses correct domain terminology, and maintains the professional tone required for safeguarding documents. Fix any literal translations, grammar errors, or contextual mistakes."}`;
-					const correctedText = await callClaude(CORRECTION_PROMPT, correctionMessage);
+					const correctedText = await callClaude(correctionPrompt, correctionMessage);
 
 					if (correctedText && correctedText.length > 10) {
 						// Only overwrite if the file is plain text (not a structured .docx)
@@ -560,29 +1120,45 @@ export const handler = async (event: any) => {
 			? parseFloat((scoredEntries.reduce((sum, a) => sum + a.finalBleuScore, 0) / scoredEntries.length).toFixed(1))
 			: -1;
 
+		// Check if any language flagged as needing review (artifact density too high)
+		const needsReviewEntries = auditTrail.filter(a => a.layers?.artifactDetection?.needsReview);
+		const jobNeedsReview = needsReviewEntries.length > 0;
+
+		const updateExpression = jobNeedsReview
+			? "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, qualityPipelineVersion = :pv, jobStatus = :js"
+			: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, qualityPipelineVersion = :pv";
+
+		const expressionValues: Record<string, any> = {
+			":qs": { N: String(overallBleuScore) },
+			":qa": { S: JSON.stringify(auditTrail) },
+			":qr": { S: new Date().toISOString() },
+			":bs": { N: String(overallBleuScore) },
+			":pv": { S: "v2" },
+		};
+		if (jobNeedsReview) {
+			expressionValues[":js"] = { S: "NEEDS_REVIEW" };
+		}
+
 		await dynamodb.send(
 			new UpdateItemCommand({
 				TableName: JOB_TABLE_NAME,
 				Key: { id: { S: jobId } },
-				UpdateExpression: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs",
-				ExpressionAttributeValues: {
-					":qs": { N: String(overallBleuScore) },
-					":qa": { S: JSON.stringify(auditTrail) },
-					":qr": { S: new Date().toISOString() },
-					":bs": { N: String(overallBleuScore) },
-				},
+				UpdateExpression: updateExpression,
+				ExpressionAttributeValues: expressionValues,
 			})
 		);
 
-		console.log(`Quality review complete for job ${jobId}. BLEU: ${overallBleuScore}. AI Score: ${auditTrail[0]?.aiScore || 'N/A'}. Languages reviewed: ${scoredEntries.length}. Corrections applied: ${auditTrail.filter(a => a.correctionApplied).length}`);
+		console.log(`Quality review complete for job ${jobId}. BLEU: ${overallBleuScore}. AI Score: ${auditTrail[0]?.aiScore || 'N/A'}. Languages reviewed: ${scoredEntries.length}. Corrections applied: ${auditTrail.filter(a => a.correctionApplied).length}. Needs review: ${jobNeedsReview}`);
 
 		return {
 			statusCode: 200,
 			body: JSON.stringify({
 				jobId,
-				overallScore,
+				overallBleuScore,
 				languagesReviewed: scoredEntries.length,
 				correctionsApplied: auditTrail.filter(a => a.correctionApplied).length,
+				needsReview: jobNeedsReview,
+				pipelineVersion: "v2",
 			}),
 		};
 	} catch (err) {

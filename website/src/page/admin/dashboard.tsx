@@ -53,6 +53,10 @@ interface Job {
 	jobStatus: string;
 	jobError: string | null;
 	costCategory: string | null;
+	qualityScore: number | null;
+	bleuScore: number | null;
+	qualityPipelineVersion: string | null;
+	qualityReviewedAt: string | null;
 }
 
 interface RedactionLog {
@@ -206,6 +210,10 @@ export default function AdminDashboard() {
 								costCategory
 								teamName
 								operationalArea
+								qualityScore
+								bleuScore
+								qualityPipelineVersion
+								qualityReviewedAt
 							}
 							nextToken
 						}
@@ -669,6 +677,71 @@ export default function AdminDashboard() {
 								</Box>
 								<Box variant="small" color="text-body-secondary">
 									Submitted before this question was added
+								</Box>
+							</div>
+						</ColumnLayout>
+					</Container>
+
+					{/* Translation Quality Metrics */}
+					<Container header={<Header variant="h3">Translation Quality (v2 Pipeline)</Header>}>
+						<ColumnLayout columns={3} variant="text-grid">
+							<div>
+								<Box variant="awsui-key-label">Avg BLEU Score</Box>
+								<Box variant="h2">
+									{(() => {
+										const scored = completedJobs.filter((j) => j.bleuScore && j.bleuScore > 0);
+										if (scored.length === 0) return "—";
+										const avg = scored.reduce((s, j) => s + (j.bleuScore || 0), 0) / scored.length;
+										return avg.toFixed(1);
+									})()}
+								</Box>
+								<Box variant="small" color="text-body-secondary">
+									Target: 85/100
+								</Box>
+							</div>
+							<div>
+								<Box variant="awsui-key-label">v2 Pipeline Jobs</Box>
+								<Box variant="h2">
+									{completedJobs.filter((j) => j.qualityPipelineVersion === "v2").length}
+								</Box>
+								<Box variant="small" color="text-body-secondary">
+									Multi-engine + terminology
+								</Box>
+							</div>
+							<div>
+								<Box variant="awsui-key-label">QA Reviewed</Box>
+								<Box variant="h2">
+									{completedJobs.filter((j) => j.qualityReviewedAt).length}
+								</Box>
+								<Box variant="small" color="text-body-secondary">
+									Of {completedJobs.length} completed
+								</Box>
+							</div>
+							<div>
+								<Box variant="awsui-key-label">Needs Review</Box>
+								<Box variant="h2" color="text-status-warning">
+									{filteredJobs.filter((j) => j.jobStatus === "NEEDS_REVIEW").length}
+								</Box>
+								<Box variant="small" color="text-body-secondary">
+									High artifact density
+								</Box>
+							</div>
+							<div>
+								<Box variant="awsui-key-label">Score Range</Box>
+								<Box variant="p">
+									{(() => {
+										const scored = completedJobs.filter((j) => j.bleuScore && j.bleuScore > 0);
+										if (scored.length === 0) return "—";
+										const min = Math.min(...scored.map(j => j.bleuScore!));
+										const max = Math.max(...scored.map(j => j.bleuScore!));
+										return `${min.toFixed(0)} – ${max.toFixed(0)}`;
+									})()}
+								</Box>
+							</div>
+							<div>
+								<Box variant="awsui-key-label">v1 Legacy Jobs</Box>
+								<Box variant="p">
+									{completedJobs.filter((j) => !j.qualityPipelineVersion || j.qualityPipelineVersion === "v1").length}
 								</Box>
 							</div>
 						</ColumnLayout>

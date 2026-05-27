@@ -1,0 +1,72 @@
+{
+  "sq": {
+    "language": "Albanian",
+    "formality": "formal",
+    "honorifics": "Use formal 'ju' (you-plural/formal) when addressing families. Use 'Zoti/Zonja' (Mr/Mrs) for parents.",
+    "toneGuidance": "Professional, respectful. Albanian social work documents use formal register throughout. Avoid colloquialisms. Use standard Albanian (Tosk-based).",
+    "culturalNotes": "Albanian readers expect formal institutional language. Direct address should use polite forms. Legal terminology should follow Albanian civil code conventions."
+  },
+  "ar": {
+    "language": "Arabic",
+    "formality": "formal",
+    "honorifics": "Use formal address forms. Include 'السيد/السيدة' (Mr/Mrs) for parents. Use plural 'أنتم' for formal address.",
+    "toneGuidance": "Formal Modern Standard Arabic (MSA) for official documents. Avoid dialectal forms entirely. Use passive constructions for professional distance where appropriate.",
+    "culturalNotes": "Right-to-left text. Formal register expected for government/legal documents. Avoid colloquial Egyptian/Levantine forms."
+  },
+  "ta": {
+    "language": "Tamil",
+    "formality": "formal",
+    "honorifics": "Use respectful suffix '-கள்' (-kal) for plural/formal address. Use 'நீங்கள்' (nīṅkaḷ) not 'நீ' (nī).",
+    "toneGuidance": "Formal written Tamil (centamil where appropriate for official documents). Professional institutional tone. Avoid spoken Tamil (koduntamil) forms.",
+    "culturalNotes": "Tamil has distinct formal/informal registers. Official documents require formal register. Use Brahmi-derived vocabulary for legal/institutional terms where established."
+  },
+  "fa": {
+    "language": "Farsi/Persian",
+    "formality": "formal",
+    "honorifics": "Use formal 'شما' (shomā) for address. Include 'آقای/خانم' (Mr/Mrs) titles. Never use 'تو' (to/informal you).",
+    "toneGuidance": "Formal written Farsi. Professional and respectful tone appropriate for legal/social care context. Use standard Iranian Persian.",
+    "culturalNotes": "Persian formal register is well-established for institutional communications. Use Arabic-origin vocabulary for legal terms where this is the established convention."
+  },
+  "es": {
+    "language": "Spanish",
+    "formality": "formal",
+    "honorifics": "Use 'usted' (formal you) throughout. Never use 'tú' in official documents. Use 'Señor/Señora' for parents.",
+    "toneGuidance": "Formal institutional Spanish. European Spanish conventions unless family origin indicates Latin American Spanish. Use subjunctive mood correctly for formal requests.",
+    "culturalNotes": "Safeguarding terminology varies between Spain and Latin America. Default to European Spanish. Use 'protección de menores' not 'protección infantil' for child protection."
+  },
+  "ur": {
+    "language": "Urdu",
+    "formality": "formal",
+    "honorifics": "Use 'آپ' (āp) for formal address. Include 'جناب/محترمہ' for respectful reference to parents. Never use 'تم' (tum) or 'تو' (tu).",
+    "toneGuidance": "Formal written Urdu appropriate for official government documents. Use Persianised vocabulary for formal/legal terms where this is established convention.",
+    "culturalNotes": "Right-to-left script. Formal register with appropriate Urdu vocabulary. Avoid excessive Hindi-origin words where Urdu/Persian equivalents exist for formal documents."
+  },
+  "fr": {
+    "language": "French",
+    "formality": "formal",
+    "honorifics": "Use 'vous' throughout. Never use 'tu' in official documents. Use 'Monsieur/Madame' for parents.",
+    "toneGuidance": "Formal administrative French. Professional tone consistent with French social services documentation (ASE - Aide Sociale à l'Enfance conventions). Use passive constructions for professional distance.",
+    "culturalNotes": "French institutional language has specific conventions. Use established child protection terminology from French social services. 'Signalement' for referral, 'mesure de protection' for protection order."
+  },
+  "pt": {
+    "language": "Portuguese",
+    "formality": "formal",
+    "honorifics": "Use formal 'o senhor/a senhora' for direct address. Use 'Senhor/Senhora' titles. Avoid 'tu' entirely.",
+    "toneGuidance": "Formal European Portuguese for official documents. Use passive voice and impersonal constructions appropriate for institutional communications.",
+    "culturalNotes": "Default to European Portuguese unless family origin indicates Brazilian Portuguese. Use 'proteção de menores' for child protection. Follow Portuguese CPCJ (Comissão de Proteção) terminology conventions."
+  },
+  "so": {
+    "language": "Somali",
+    "formality": "formal",
+    "honorifics": "Use respectful address forms. Use 'Mudane/Marwo' (Mr/Mrs) for parents. Use plural forms for formal address.",
+    "toneGuidance": "Formal written Somali. Clear, professional language accessible to readers with varying literacy levels. Avoid complex subordinate clauses where simpler structures convey the same meaning.",
+    "culturalNotes": "Somali has limited standardised terminology for social work concepts. Use clear explanatory language where direct equivalents don't exist. Prefer established Somali terms over Arabic loanwords where both exist."
+  },
+  "tr": {
+    "language": "Turkish",
+    "formality": "formal",
+    "honorifics": "Use 'siz' (formal you) throughout. Include 'Bey/Hanım' (Mr/Mrs) after first names where appropriate. Never use 'sen' (informal you).",
+    "toneGuidance": "Formal institutional Turkish consistent with official government communications. Use established social services terminology from Turkish SHÇEK (Sosyal Hizmetler) conventions.",
+    "culturalNotes": "Turkish formal register is well-defined. Use standard institutional language. Avoid overly Ottoman/Arabic-origin vocabulary where modern Turkish equivalents are established."
+  }
+}
