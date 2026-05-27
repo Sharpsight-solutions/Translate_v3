@@ -25,6 +25,9 @@ import { formatJobNameId } from "../../util/formatJobNameId";
 import { formatTimestamp } from "../../util/formatTimestamp";
 import { getPresignedUrl } from "../../util/getPresignedUrl";
 import { describeS3Key } from "./util/describeS3Key";
+import { getLanguageName } from "../../util/languageNames";
+import FeedbackWidget from "../partial/feedbackWidget";
+import ProcessingProgress from "./processingProgress";
 
 const cfnOutputs = require("../../cfnOutputs.json");
 
@@ -54,8 +57,6 @@ export default function HistoryTable() {
 	const [hideExpired, setHideExpired] = useState(true);
 	const [filteringText, setFilteringText] = useState("");
 
-	const toggleExpired = () => setHideExpired(!hideExpired);
-
 	/* formatTargets */
 	const formatTargets = (stringTargets: string) => {
 		const targets: string[] = JSON.parse(stringTargets);
@@ -68,12 +69,7 @@ export default function HistoryTable() {
 						{targets.length} {t("generic_languages")}
 					</span>
 				)}
-				{!showSummary &&
-					JSON.stringify(targets)
-						.replaceAll(",", ", ")
-						.replaceAll("[", "")
-						.replaceAll("]", "")
-						.replaceAll('"', "")}
+				{!showSummary && targets.map(getLanguageName).join(", ")}
 			</>
 		);
 	};
@@ -83,16 +79,10 @@ export default function HistoryTable() {
 		return (
 			<>
 				{item.jobStatus.toUpperCase() === "UPLOADED" && (
-					<TextContent data-status="isUploaded">
-						<Spinner />
-						&nbsp;{t("generic_status_uploaded")}
-					</TextContent>
+					<ProcessingProgress createdAt={item.createdAt} estimatedDurationSeconds={840} />
 				)}
 				{item.jobStatus.toUpperCase() === "PROCESSING" && (
-					<TextContent data-status="isProcessing">
-						<Spinner />
-						&nbsp;{t("generic_status_processing")}
-					</TextContent>
+					<ProcessingProgress createdAt={item.createdAt} estimatedDurationSeconds={840} />
 				)}
 				{item.jobStatus.toUpperCase() === "EXPIRED" && (
 					<TextContent data-status="isExpired">
@@ -169,7 +159,7 @@ export default function HistoryTable() {
 				{
 					id: "source",
 					header: t("generic_source"),
-					cell: (item: Item) => item.languageSource,
+					cell: (item: Item) => getLanguageName(item.languageSource),
 				},
 				{
 					id: "targets",
@@ -180,6 +170,15 @@ export default function HistoryTable() {
 					id: "status",
 					header: t("generic_status"),
 					cell: (item: Item) => formatStatus(item),
+				},
+				{
+					id: "feedback",
+					header: "Was this helpful?",
+					cell: (item: Item) =>
+						item.jobStatus.toUpperCase() === "COMPLETED" ||
+						item.jobStatus.toUpperCase() === "DIRECT_COMPLETED" ? (
+							<FeedbackWidget feature="translation" jobId={item.id} />
+						) : null,
 				},
 			]}
 			stickyColumns={{ first: 0, last: 1 }}
@@ -212,8 +211,8 @@ export default function HistoryTable() {
 					counter={`(${jobs.length})`}
 					actions={
 						<Toggle
-							onChange={({ detail }) => toggleExpired(detail.checked)}
-							checked={hideExpired ? false : true}
+							onChange={({ detail }) => setHideExpired(!detail.checked)}
+							checked={!hideExpired}
 						>
 							{t("generic_status_expired")}
 						</Toggle>

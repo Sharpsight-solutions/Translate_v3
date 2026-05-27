@@ -4,12 +4,14 @@ import { useState } from "react";
 
 import { downloadFile } from "../util/downloadFile";
 import { translateDocument } from "../util/translateDocument";
+import { verifyAndRefineTranslation } from "../../../util/translationQuality";
 
 interface TranslationProgress {
 	[key: string]: {
-		status: "pending" | "translating" | "completed" | "error";
+		status: "pending" | "translating" | "verifying" | "refining" | "completed" | "error";
 		error?: string;
 		usedTerminology?: boolean;
+		qualityScore?: number;
 	};
 }
 
@@ -62,6 +64,52 @@ export function useDirectTranslation() {
 						document: file,
 					});
 
+					// Quality verification for text-based files
+					let finalContent = result.translatedContent;
+					let qualityScore = -1;
+
+					const textTypes = [
+						"text/plain",
+						"text/html",
+						"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					];
+
+					if (textTypes.includes(file.type)) {
+						try {
+							setProgress((prev) => ({
+								...prev,
+								[targetLang]: { status: "verifying" },
+							}));
+
+							const originalText = await file.text();
+							const translatedBlob = result.translatedContent;
+							const translatedText = await translatedBlob.text();
+
+							const qualityResult = await verifyAndRefineTranslation(
+								originalText,
+								translatedText,
+								sourceLanguage,
+								targetLang,
+								95
+							);
+
+							qualityScore = qualityResult.score;
+
+							if (qualityResult.refinedTranslation) {
+								setProgress((prev) => ({
+									...prev,
+									[targetLang]: { status: "refining" },
+								}));
+								finalContent = new Blob([qualityResult.refinedTranslation], {
+									type: file.type,
+								});
+							}
+						} catch (qualityErr) {
+							// Don't block the download if quality check fails
+							console.error("Quality check failed:", qualityErr);
+						}
+					}
+
 					// Generate filename with language code
 					const fileNameParts = file.name.split(".");
 					const extension = fileNameParts.pop() || "";
@@ -69,7 +117,7 @@ export function useDirectTranslation() {
 					const downloadFileName = `${baseName}_${targetLang}.${extension}`;
 
 					// Download the translated file
-					downloadFile(result.translatedContent, downloadFileName, file.type);
+					downloadFile(finalContent, downloadFileName, file.type);
 
 					// Update progress with terminology usage info
 					setProgress((prev) => ({
@@ -77,6 +125,7 @@ export function useDirectTranslation() {
 						[targetLang]: {
 							status: "completed",
 							usedTerminology: result.usedTerminology,
+							qualityScore,
 						},
 					}));
 					setCompletedCount((prev) => prev + 1);

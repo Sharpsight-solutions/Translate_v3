@@ -105,7 +105,7 @@ export default function NewFormOriginalDocument(props: {
 										"translation_new_original_document_error_unsupported_type"
 									)) ||
 								(props.formErrors.unsupportedFileSize &&
-									`${t("translation_new_original_document_error_too_large")} (${supportedFileSizeMegaBytes} MB/${supportedFileSizeKiloBytes} KB)`) ||
+									`${t("translation_new_original_document_error_too_large")} (${supportedFileSizeMegaBytes} MB)`) ||
 								(!props.fileState &&
 									t("translation_new_original_document_error_no_doc"))
 							}

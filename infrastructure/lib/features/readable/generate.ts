@@ -14,9 +14,9 @@ import {
 import { dt_stepfunction } from "../../components/stepfunction";
 import { dt_lambda } from "../../components/lambda";
 
-import { dt_readableWorkflow as dt_readableWorkflow_anthropic_claude3Text } from "./vendor/text.anthropic.claude-3-*-*-v1";
+import { dt_readableWorkflow as dt_readableWorkflow_anthropic_claude3Text } from "./vendor/text.anthropic.claude-3";
 import { dt_readableWorkflow as dt_readableWorkflow_stabilityai_stableDiffusion } from "./vendor/image.stability.stable-diffusion-xl-v1";
-import { dt_readableWorkflow as dt_readableWorkflow_stabilityai_stableDiffusion_3 } from "./vendor/image.stability.sd3-*";
+import { dt_readableWorkflow as dt_readableWorkflow_stabilityai_stableDiffusion_3 } from "./vendor/image.stability.sd3";
 import { dt_readableWorkflow as dt_readableWorkflow_converseText } from "./vendor/text.converse";
 
 export interface props {

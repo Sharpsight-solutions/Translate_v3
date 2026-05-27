@@ -8,11 +8,13 @@ import { NagSuppressions } from "cdk-nag";
 import {
 	aws_iam as iam,
 	aws_cognito as cognito,
+	aws_lambda as lambda,
 	aws_wafv2 as waf,
 	aws_appsync as appsync,
 } from "aws-cdk-lib";
 import * as identitypool from "@aws-cdk/aws-cognito-identitypool-alpha";
 import { CodeFirstSchema } from "awscdk-appsync-utils";
+import { dt_lambda } from "../components/lambda";
 
 export interface props {
 	instanceName: string;
@@ -81,7 +83,8 @@ export class dt_api extends Construct {
 			passwordPolicy,
 			mfa,
 			mfaSecondFactor,
-			selfSignUpEnabled: false,
+			selfSignUpEnabled: true,
+			autoVerify: { email: true },
 			removalPolicy: props.removalPolicy, // ASM-CFN1
 			accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
 		});
@@ -126,6 +129,19 @@ export class dt_api extends Construct {
 			);
 		}
 
+		// COGNITO | USERPOOL | PRE SIGN-UP TRIGGER
+		const preSignUpLambda = new dt_lambda(this, "preSignUpLambda", {
+			path: "lambda/cognitoPreSignUp",
+			description: "Cognito Pre Sign-Up - Email Domain Restriction",
+			environment: {
+				ALLOWED_EMAIL_DOMAIN: "achievingforchildren.org.uk",
+			},
+		});
+		this.userPool.addTrigger(
+			cognito.UserPoolOperation.PRE_SIGN_UP,
+			preSignUpLambda.lambdaFunction,
+		);
+
 		// COGNITO | USERPOOL | ADVANCED SECURITY
 		const cfnUserPool = this.userPool.node.defaultChild as cognito.CfnUserPool;
 		cfnUserPool.userPoolAddOns = {
@@ -140,6 +156,13 @@ export class dt_api extends Construct {
 					cdk.Stack.of(this).account
 				}-${props.instanceName}`,
 			},
+		});
+
+		// COGNITO | USERPOOL | ADMIN GROUP
+		new cognito.CfnUserPoolGroup(this, "AdminGroup", {
+			userPoolId: this.userPool.userPoolId,
+			groupName: "admin",
+			description: "Admin users with access to the reporting dashboard",
 		});
 
 		// COGNITO | USERPOOL | SAMLPROVIDER

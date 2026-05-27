@@ -1,0 +1,298 @@
+/* Welcome Screen Styles */
+.welcome-container {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	min-height: 100vh;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Left Panel - Brand */
+.welcome-brand-panel {
+	background: linear-gradient(160deg, #1a1a2e 0%, #2E2E3A 50%, #3d3d52 100%);
+	color: #ffffff;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3rem;
+	position: relative;
+	overflow: hidden;
+}
+
+.welcome-brand-panel::before {
+	content: "";
+	position: absolute;
+	top: -50%;
+	left: -50%;
+	width: 200%;
+	height: 200%;
+	background: radial-gradient(circle at 30% 70%, rgba(245, 184, 0, 0.05) 0%, transparent 50%);
+	pointer-events: none;
+}
+
+.welcome-brand-content {
+	max-width: 440px;
+	position: relative;
+	z-index: 1;
+}
+
+.welcome-logo {
+	width: 200px;
+	height: auto;
+	margin-bottom: 2rem;
+	filter: brightness(1.1);
+}
+
+.welcome-badge {
+	display: inline-block;
+	background-color: rgba(245, 184, 0, 0.12);
+	color: #f5b800;
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	padding: 0.3rem 0.75rem;
+	border-radius: 20px;
+	border: 1px solid rgba(245, 184, 0, 0.25);
+	margin-bottom: 1.25rem;
+}
+
+.welcome-title {
+	font-size: 1.85rem;
+	font-weight: 700;
+	margin: 0 0 0.75rem 0;
+	line-height: 1.2;
+	color: #ffffff;
+}
+
+.welcome-description {
+	font-size: 1rem;
+	line-height: 1.7;
+	opacity: 0.85;
+	margin-bottom: 2.25rem;
+}
+
+.welcome-features {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+
+.welcome-feature-item {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.75rem;
+	margin-bottom: 1.1rem;
+	font-size: 0.9rem;
+	line-height: 1.5;
+	opacity: 0.85;
+}
+
+.welcome-feature-icon {
+	color: #f5b800;
+	font-size: 0.85rem;
+	flex-shrink: 0;
+	margin-top: 0.2rem;
+	width: 20px;
+	height: 20px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(245, 184, 0, 0.12);
+	border-radius: 50%;
+}
+
+/* Right Panel - Form */
+.welcome-form-panel {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3rem;
+	background-color: #ffffff;
+}
+
+.welcome-form-content {
+	max-width: 380px;
+	width: 100%;
+}
+
+.welcome-form-heading {
+	font-size: 1.5rem;
+	font-weight: 700;
+	color: #1a1a2e;
+	margin: 0 0 0.5rem 0;
+}
+
+.welcome-form-subheading {
+	font-size: 0.9rem;
+	color: #555;
+	margin-bottom: 1.5rem;
+	line-height: 1.5;
+}
+
+.welcome-form {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+}
+
+.welcome-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+.welcome-field label {
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: #333;
+}
+
+.welcome-field input {
+	padding: 0.7rem 0.85rem;
+	border: 1px solid #d0d0d8;
+	border-radius: 6px;
+	font-size: 0.95rem;
+	transition: border-color 0.2s;
+	outline: none;
+}
+
+.welcome-field input:focus {
+	border-color: #2E2E3A;
+	box-shadow: 0 0 0 2px rgba(46, 46, 58, 0.12);
+}
+
+.welcome-button {
+	margin-top: 0.5rem;
+	padding: 0.75rem 1.5rem;
+	background-color: #2E2E3A;
+	color: #ffffff;
+	border: none;
+	border-radius: 6px;
+	font-size: 1rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background-color 0.2s, transform 0.1s;
+}
+
+.welcome-button:hover:not(:disabled) {
+	background-color: #f5b800;
+	color: #1a1a2e;
+}
+
+.welcome-button:active:not(:disabled) {
+	transform: scale(0.98);
+}
+
+.welcome-button:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+/* Create account CTA */
+.welcome-create-account {
+	margin-top: 1.5rem;
+	padding: 1rem;
+	background-color: #f8f9fa;
+	border-radius: 8px;
+	border: 1px solid #e9ecef;
+	text-align: center;
+}
+
+.welcome-create-account p {
+	margin: 0 0 0.5rem 0;
+	font-size: 0.85rem;
+	color: #555;
+}
+
+.welcome-create-account-button {
+	background: none;
+	border: 2px solid #2E2E3A;
+	color: #2E2E3A;
+	padding: 0.5rem 1.25rem;
+	border-radius: 6px;
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: all 0.2s;
+}
+
+.welcome-create-account-button:hover {
+	background-color: #2E2E3A;
+	color: #ffffff;
+}
+
+.welcome-links {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	margin-top: 1rem;
+}
+
+.welcome-link-button {
+	background: none;
+	border: none;
+	color: #2E2E3A;
+	font-size: 0.85rem;
+	cursor: pointer;
+	text-align: left;
+	padding: 0;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.welcome-link-button:hover {
+	color: #f5b800;
+}
+
+.welcome-error {
+	background-color: #fef2f2;
+	border: 1px solid #fecaca;
+	color: #b91c1c;
+	padding: 0.65rem 0.85rem;
+	border-radius: 6px;
+	font-size: 0.85rem;
+	margin-bottom: 0.5rem;
+}
+
+.welcome-message {
+	background-color: #f0fdf4;
+	border: 1px solid #bbf7d0;
+	color: #166534;
+	padding: 0.65rem 0.85rem;
+	border-radius: 6px;
+	font-size: 0.85rem;
+	margin-bottom: 0.5rem;
+}
+
+.welcome-restriction-note {
+	margin-top: 1.5rem;
+	padding-top: 1rem;
+	border-top: 1px solid #e9ecef;
+}
+
+.welcome-restriction-note p {
+	font-size: 0.78rem;
+	color: #888;
+	line-height: 1.5;
+	margin: 0;
+	text-align: center;
+}
+
+/* Responsive - stack on mobile */
+@media (max-width: 768px) {
+	.welcome-container {
+		grid-template-columns: 1fr;
+	}
+
+	.welcome-brand-panel {
+		padding: 2.5rem 1.5rem;
+	}
+
+	.welcome-form-panel {
+		padding: 2rem 1.5rem;
+	}
+
+	.welcome-title {
+		font-size: 1.5rem;
+	}
+}

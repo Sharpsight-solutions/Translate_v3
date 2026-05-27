@@ -19,6 +19,7 @@ import { dt_translationTranslate } from "./translate";
 import { dt_translationErrors } from "./errors";
 import { dt_translationLifecycle } from "./lifecycle";
 import { dt_translationMain } from "./main";
+import { dt_translationPdfAndWordCount } from "./pdfAndWordCount";
 import {
 	CodeFirstSchema,
 	GraphqlType,
@@ -149,6 +150,11 @@ export class dt_translate extends Construct {
 						actions: [
 							"translate:TranslateText",
 							"comprehend:DetectDominantLanguage",
+							"comprehend:DetectPiiEntities",
+							"bedrock:InvokeModel",
+							"aws-marketplace:ViewSubscriptions",
+							"aws-marketplace:Subscribe",
+							"cognito-idp:ListUsers",
 						],
 						resources: ["*"],
 					}),
@@ -167,6 +173,11 @@ export class dt_translate extends Construct {
 					appliesTo: [
 						"Action::translate:TranslateText",
 						"Action::comprehend:DetectDominantLanguage",
+						"Action::comprehend:DetectPiiEntities",
+						"Action::bedrock:InvokeModel",
+						"Action::aws-marketplace:ViewSubscriptions",
+						"Action::aws-marketplace:Subscribe",
+						"Action::cognito-idp:ListUsers",
 						"Resource::*",
 					],
 				},
@@ -247,6 +258,8 @@ export class dt_translate extends Construct {
 				"languageSource", // TODO variableise me
 				"languageTargets", // TODO variableise me
 				"translateKey", // TODO variableise me
+				"wordCount",
+				"jobError",
 			],
 		});
 
@@ -289,6 +302,12 @@ export class dt_translate extends Construct {
 					languageSource: GraphqlType.string(),
 					languageTargets: GraphqlType.awsJson(),
 					translateKey: GraphqlType.awsJson(),
+					wordCount: GraphqlType.int(),
+					jobError: GraphqlType.string(),
+					completedAt: GraphqlType.string(),
+					costCategory: GraphqlType.string(),
+					teamName: GraphqlType.string(),
+					operationalArea: GraphqlType.string(),
 				},
 				directives: [Directive.custom("@aws_cognito_user_pools")],
 			},
@@ -341,6 +360,55 @@ export class dt_translate extends Construct {
 		});
 		props.apiSchema.addQuery(`${FEATURE_PREFIX}ListJobs`, listJobsQuery);
 
+		// API | QUERY listAllJobs (admin only)
+		// OUTPUT - reuses listJobs_output_item
+		const listAllJobs_output = new OutputType(
+			`${FEATURE_PREFIX}_listAllJobs_output`,
+			{
+				definition: {
+					items: listJobs_output_item.attribute({ isList: true }),
+					nextToken: GraphqlType.string(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(listAllJobs_output);
+
+		// QUERY
+		const listAllJobsQuery = new ResolvableField({
+			returnType: listAllJobs_output.attribute(),
+			dataSource: apiDsJobTable,
+			args: {
+				limit: GraphqlType.int(),
+				nextToken: GraphqlType.string(),
+			},
+			requestMappingTemplate: appsync.MappingTemplate.fromString(`
+				## Only allow admin group members
+				#set($groups = $ctx.identity.claims.get("cognito:groups"))
+				#if(!$groups.contains("admin"))
+					$util.unauthorized()
+				#end
+				{
+					"version": "2017-02-28",
+					"operation": "Scan",
+					#if($ctx.args.limit)
+						"limit": $ctx.args.limit,
+					#end
+					#if($ctx.args.nextToken)
+						"nextToken": "$ctx.args.nextToken",
+					#end
+				}
+			`),
+			responseMappingTemplate: appsync.MappingTemplate.fromString(`
+				{
+					"items": $util.toJson($ctx.result.items),
+					"nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+				}
+			`),
+			directives: [Directive.custom("@aws_cognito_user_pools")],
+		});
+		props.apiSchema.addQuery(`${FEATURE_PREFIX}ListAllJobs`, listAllJobsQuery);
+
 		// API | MUTATION
 		// API | MUTATION createJob
 		// INPUT
@@ -360,6 +428,10 @@ export class dt_translate extends Construct {
 				translateCallback: GraphqlType.awsJson(),
 				translateKey: GraphqlType.awsJson(),
 				translateStatus: GraphqlType.awsJson(),
+				wordCount: GraphqlType.int(),
+				costCategory: GraphqlType.string(),
+				teamName: GraphqlType.string(),
+				operationalArea: GraphqlType.string(),
 			},
 			directives: [Directive.custom("@aws_cognito_user_pools")],
 		});
@@ -384,6 +456,8 @@ export class dt_translate extends Construct {
 					translateCallback: GraphqlType.awsJson(),
 					translateKey: GraphqlType.awsJson(),
 					translateStatus: GraphqlType.awsJson(),
+					wordCount: GraphqlType.int(),
+					jobError: GraphqlType.string(),
 				},
 				directives: [Directive.custom("@aws_cognito_user_pools")],
 			},
@@ -422,6 +496,322 @@ export class dt_translate extends Construct {
 			`${FEATURE_PREFIX}CreateJob`,
 			createJobMutation,
 		);
+
+		//
+		// REDACTION LOG
+		//
+		// REDACTION LOG | DYNAMODB
+		const redactionLogTable = new dynamodb.Table(this, "redactionLogTable", {
+			partitionKey: {
+				name: "id",
+				type: dynamodb.AttributeType.STRING,
+			},
+			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+			tableClass: dynamodb.TableClass.STANDARD_INFREQUENT_ACCESS,
+			pointInTimeRecovery: true,
+			removalPolicy: props.removalPolicy,
+		});
+
+		// REDACTION LOG | GSI
+		const REDACTION_GSI = "byCreatedAt";
+		redactionLogTable.addGlobalSecondaryIndex({
+			indexName: REDACTION_GSI,
+			partitionKey: {
+				name: "logType",
+				type: dynamodb.AttributeType.STRING,
+			},
+			sortKey: {
+				name: "createdAt",
+				type: dynamodb.AttributeType.NUMBER,
+			},
+			projectionType: dynamodb.ProjectionType.ALL,
+		});
+
+		// REDACTION LOG | API DATA SOURCE
+		const REDACTION_PREFIX = "redaction";
+		const apiDsRedactionLogTable = props.api.addDynamoDbDataSource(
+			`${REDACTION_PREFIX}LogTable`,
+			redactionLogTable,
+		);
+		NagSuppressions.addResourceSuppressions(
+			props.api,
+			[
+				{
+					id: "AwsSolutions-IAM5",
+					reason: "Permission is scoped to dedicated DDB table",
+					appliesTo: [
+						`Resource::<${cdk.Stack.of(this).getLogicalId(
+							redactionLogTable.node.defaultChild as cdk.CfnElement,
+						)}.Arn>/index/*`,
+					],
+				},
+			],
+			true,
+		);
+
+		// REDACTION LOG | MUTATION createRedactionLog
+		const createRedactionLog_input = new InputType(
+			`${REDACTION_PREFIX}_createLog_input`,
+			{
+				definition: {
+					id: GraphqlType.id({ isRequired: true }),
+					mode: GraphqlType.string({ isRequired: true }),
+					wordCount: GraphqlType.int(),
+					entitiesDetected: GraphqlType.int(),
+					entitiesRedacted: GraphqlType.int(),
+					categories: GraphqlType.awsJson(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(createRedactionLog_input);
+
+		const createRedactionLog_output = new OutputType(
+			`${REDACTION_PREFIX}_createLog_output`,
+			{
+				definition: {
+					id: GraphqlType.id({ isRequired: true }),
+					userSub: GraphqlType.string(),
+					mode: GraphqlType.string(),
+					wordCount: GraphqlType.int(),
+					entitiesDetected: GraphqlType.int(),
+					entitiesRedacted: GraphqlType.int(),
+					categories: GraphqlType.awsJson(),
+					createdAt: GraphqlType.awsTimestamp(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(createRedactionLog_output);
+
+		const createRedactionLogMutation = new ResolvableField({
+			returnType: createRedactionLog_output.attribute(),
+			args: {
+				input: createRedactionLog_input.attribute(),
+			},
+			dataSource: apiDsRedactionLogTable,
+			requestMappingTemplate: appsync.MappingTemplate.fromString(`
+				#set($input = $ctx.args.input)
+				#set($input.userSub = $ctx.identity.sub)
+				#set($input.createdAt = $util.time.nowEpochSeconds())
+				#set($input.logType = "redaction")
+				{
+					"version": "2017-02-28",
+					"operation": "PutItem",
+					"key": {
+						"id": $util.dynamodb.toDynamoDBJson($ctx.args.input.id)
+					},
+					"attributeValues": $util.dynamodb.toMapValuesJson($input)
+				}
+			`),
+			responseMappingTemplate: appsync.MappingTemplate.dynamoDbResultItem(),
+			directives: [Directive.custom("@aws_cognito_user_pools")],
+		});
+		props.apiSchema.addMutation(
+			`${REDACTION_PREFIX}CreateLog`,
+			createRedactionLogMutation,
+		);
+
+		// REDACTION LOG | QUERY listRedactionLogs (admin only)
+		const listRedactionLogs_output = new OutputType(
+			`${REDACTION_PREFIX}_listLogs_output`,
+			{
+				definition: {
+					items: createRedactionLog_output.attribute({ isList: true }),
+					nextToken: GraphqlType.string(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(listRedactionLogs_output);
+
+		const listRedactionLogsQuery = new ResolvableField({
+			returnType: listRedactionLogs_output.attribute(),
+			dataSource: apiDsRedactionLogTable,
+			args: {
+				limit: GraphqlType.int(),
+				nextToken: GraphqlType.string(),
+			},
+			requestMappingTemplate: appsync.MappingTemplate.fromString(`
+				## Only allow admin group members
+				#set($groups = $ctx.identity.claims.get("cognito:groups"))
+				#if(!$groups.contains("admin"))
+					$util.unauthorized()
+				#end
+				{
+					"version": "2017-02-28",
+					"operation": "Query",
+					"index": "${REDACTION_GSI}",
+					"query": {
+						"expression": "#lt = :lt",
+						"expressionNames": {
+							"#lt": "logType"
+						},
+						"expressionValues": {
+							":lt": $util.dynamodb.toDynamoDBJson("redaction")
+						}
+					},
+					"scanIndexForward": false
+				}
+			`),
+			responseMappingTemplate: appsync.MappingTemplate.fromString(`
+				{
+					"items": $util.toJson($ctx.result.items),
+					"nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+				}
+			`),
+			directives: [Directive.custom("@aws_cognito_user_pools")],
+		});
+		props.apiSchema.addQuery(
+			`${REDACTION_PREFIX}ListLogs`,
+			listRedactionLogsQuery,
+		);
+
+		//
+		// FEEDBACK
+		//
+		// FEEDBACK | DYNAMODB
+		const feedbackTable = new dynamodb.Table(this, "feedbackTable", {
+			partitionKey: {
+				name: "id",
+				type: dynamodb.AttributeType.STRING,
+			},
+			billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+			tableClass: dynamodb.TableClass.STANDARD_INFREQUENT_ACCESS,
+			pointInTimeRecovery: true,
+			removalPolicy: props.removalPolicy,
+		});
+
+		const FEEDBACK_GSI = "byCreatedAt";
+		feedbackTable.addGlobalSecondaryIndex({
+			indexName: FEEDBACK_GSI,
+			partitionKey: {
+				name: "logType",
+				type: dynamodb.AttributeType.STRING,
+			},
+			sortKey: {
+				name: "createdAt",
+				type: dynamodb.AttributeType.NUMBER,
+			},
+			projectionType: dynamodb.ProjectionType.ALL,
+		});
+
+		// FEEDBACK | API DATA SOURCE
+		const FEEDBACK_PREFIX = "feedback";
+		const apiDsFeedbackTable = props.api.addDynamoDbDataSource(
+			`${FEEDBACK_PREFIX}Table`,
+			feedbackTable,
+		);
+		NagSuppressions.addResourceSuppressions(
+			props.api,
+			[
+				{
+					id: "AwsSolutions-IAM5",
+					reason: "Permission is scoped to dedicated DDB table",
+					appliesTo: [
+						`Resource::<${cdk.Stack.of(this).getLogicalId(
+							feedbackTable.node.defaultChild as cdk.CfnElement,
+						)}.Arn>/index/*`,
+					],
+				},
+			],
+			true,
+		);
+
+		// FEEDBACK | MUTATION
+		const feedbackCreate_input = new InputType(
+			`${FEEDBACK_PREFIX}_create_input`,
+			{
+				definition: {
+					id: GraphqlType.id({ isRequired: true }),
+					feature: GraphqlType.string({ isRequired: true }),
+					rating: GraphqlType.string({ isRequired: true }),
+					jobId: GraphqlType.string(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(feedbackCreate_input);
+
+		const feedbackCreate_output = new OutputType(
+			`${FEEDBACK_PREFIX}_create_output`,
+			{
+				definition: {
+					id: GraphqlType.id({ isRequired: true }),
+					userSub: GraphqlType.string(),
+					feature: GraphqlType.string(),
+					rating: GraphqlType.string(),
+					jobId: GraphqlType.string(),
+					createdAt: GraphqlType.awsTimestamp(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(feedbackCreate_output);
+
+		const feedbackCreateMutation = new ResolvableField({
+			returnType: feedbackCreate_output.attribute(),
+			args: { input: feedbackCreate_input.attribute() },
+			dataSource: apiDsFeedbackTable,
+			requestMappingTemplate: appsync.MappingTemplate.fromString(`
+				#set($input = $ctx.args.input)
+				#set($input.userSub = $ctx.identity.sub)
+				#set($input.createdAt = $util.time.nowEpochSeconds())
+				#set($input.logType = "feedback")
+				{
+					"version": "2017-02-28",
+					"operation": "PutItem",
+					"key": { "id": $util.dynamodb.toDynamoDBJson($ctx.args.input.id) },
+					"attributeValues": $util.dynamodb.toMapValuesJson($input)
+				}
+			`),
+			responseMappingTemplate: appsync.MappingTemplate.dynamoDbResultItem(),
+			directives: [Directive.custom("@aws_cognito_user_pools")],
+		});
+		props.apiSchema.addMutation(`${FEEDBACK_PREFIX}Create`, feedbackCreateMutation);
+
+		// FEEDBACK | QUERY (admin only)
+		const feedbackList_output = new OutputType(
+			`${FEEDBACK_PREFIX}_list_output`,
+			{
+				definition: {
+					items: feedbackCreate_output.attribute({ isList: true }),
+					nextToken: GraphqlType.string(),
+				},
+				directives: [Directive.custom("@aws_cognito_user_pools")],
+			},
+		);
+		props.apiSchema.addType(feedbackList_output);
+
+		const feedbackListQuery = new ResolvableField({
+			returnType: feedbackList_output.attribute(),
+			dataSource: apiDsFeedbackTable,
+			requestMappingTemplate: appsync.MappingTemplate.fromString(`
+				#set($groups = $ctx.identity.claims.get("cognito:groups"))
+				#if(!$groups.contains("admin"))
+					$util.unauthorized()
+				#end
+				{
+					"version": "2017-02-28",
+					"operation": "Query",
+					"index": "${FEEDBACK_GSI}",
+					"query": {
+						"expression": "#lt = :lt",
+						"expressionNames": { "#lt": "logType" },
+						"expressionValues": { ":lt": $util.dynamodb.toDynamoDBJson("feedback") }
+					},
+					"scanIndexForward": false
+				}
+			`),
+			responseMappingTemplate: appsync.MappingTemplate.fromString(`
+				{
+					"items": $util.toJson($ctx.result.items),
+					"nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+				}
+			`),
+			directives: [Directive.custom("@aws_cognito_user_pools")],
+		});
+		props.apiSchema.addQuery(`${FEEDBACK_PREFIX}List`, feedbackListQuery);
 
 		//
 		// STATE MACHINE
@@ -490,6 +880,7 @@ export class dt_translate extends Construct {
 			{
 				namedStrings,
 				jobTable: this.jobTable,
+				contentBucket: this.contentBucket,
 				s3PrefixPrivate: props.s3PrefixPrivate,
 				removalPolicy: props.removalPolicy, // ASM-CFN1
 				sfnTranslate: featTranslationTranslate.sfnMain,
@@ -515,6 +906,14 @@ export class dt_translate extends Construct {
 			removalPolicy: props.removalPolicy, // ASM-CFN1
 			contentBucket: this.contentBucket,
 			jobTable: this.jobTable,
+		});
+
+		// PDF CONVERSION & WORD COUNT
+		new dt_translationPdfAndWordCount(this, "featPdfAndWordCount", {
+			contentBucket: this.contentBucket,
+			jobTable: this.jobTable,
+			removalPolicy: props.removalPolicy,
+			s3PrefixPrivate: props.s3PrefixPrivate,
 		});
 
 		NagSuppressions.addResourceSuppressionsByPath(

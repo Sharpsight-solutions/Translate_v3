@@ -56,3 +56,7 @@ docs/public
 util/**/config.json
 infrastructure/**/config.json
 infrastructure/**/cloudformation-outputs.json
+
+# Credentials
+*accessKeys*
+*.csv.credentials

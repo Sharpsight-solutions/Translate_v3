@@ -8,15 +8,18 @@ import { NagSuppressions } from "cdk-nag";
 
 import {
 	aws_dynamodb as dynamodb,
+	aws_s3 as s3,
 	aws_stepfunctions as sfn,
 	aws_iam as iam,
 	aws_stepfunctions_tasks as tasks,
 } from "aws-cdk-lib";
 import { dt_stepfunction } from "../../components/stepfunction";
+import { dt_lambda } from "../../components/lambda";
 
 export interface props {
 	namedStrings: { [key: string]: string };
 	jobTable: dynamodb.Table;
+	contentBucket: s3.Bucket;
 	s3PrefixPrivate: string;
 	removalPolicy: cdk.RemovalPolicy;
 	sfnTranslate: sfn.StateMachine;
@@ -127,10 +130,56 @@ export class dt_translationMain extends Construct {
 					),
 				},
 				updateExpression:
-					"SET " + props.namedStrings.attributeForJobStatus + " = :value",
+					"SET " +
+					props.namedStrings.attributeForJobStatus +
+					" = :value, completedAt = :completedAt",
 				expressionAttributeValues: {
 					":value": tasks.DynamoAttributeValue.fromString("COMPLETED"),
+					":completedAt": tasks.DynamoAttributeValue.fromString(
+						sfn.JsonPath.stringAt("$$.State.EnteredTime"),
+					),
 				},
+			},
+		);
+
+		// STATE MACHINE | MAIN | TASKS | qualityReview
+		const qualityReviewLambda = new dt_lambda(this, "qualityReviewLambda", {
+			path: "lambda/qualityReview",
+			description: "Post-translation AI quality review and correction",
+			environment: {
+				JOB_TABLE_NAME: props.jobTable.tableName,
+				CONTENT_BUCKET: props.contentBucket.bucketName,
+			},
+			timeout: cdk.Duration.minutes(15),
+		});
+		props.contentBucket.grantReadWrite(qualityReviewLambda.lambdaFunction);
+		props.jobTable.grantReadWriteData(qualityReviewLambda.lambdaFunction);
+		qualityReviewLambda.lambdaFunction.addToRolePolicy(
+			new iam.PolicyStatement({
+				actions: ["bedrock:InvokeModel", "translate:TranslateText"],
+				resources: ["*"],
+			})
+		);
+		NagSuppressions.addResourceSuppressions(
+			qualityReviewLambda.lambdaRole,
+			[
+				{
+					id: "AwsSolutions-IAM5",
+					reason: "Bedrock InvokeModel does not support resource-level permissions. S3 scoped to content bucket.",
+				},
+			],
+			true,
+		);
+
+		const invokeQualityReview = new tasks.LambdaInvoke(
+			this,
+			"invokeQualityReview",
+			{
+				lambdaFunction: qualityReviewLambda.lambdaFunction,
+				resultPath: sfn.JsonPath.DISCARD,
+				payload: sfn.TaskInput.fromObject({
+					jobDetails: sfn.JsonPath.objectAt("$.jobDetails"),
+				}),
 			},
 		);
 
@@ -155,7 +204,8 @@ export class dt_translationMain extends Construct {
 								.branch(startSfnPii),
 						)
 						.next(startSfnTag)
-						.next(updateDbJobStatus),
+						.next(updateDbJobStatus)
+						.next(invokeQualityReview),
 				},
 			).StateMachine;
 		} else {
@@ -175,7 +225,8 @@ export class dt_translationMain extends Construct {
 								// P1 SfnTranslate
 								.branch(startSfnTranslate),
 						)
-						.next(updateDbJobStatus),
+						.next(updateDbJobStatus)
+						.next(invokeQualityReview),
 				},
 			).StateMachine;
 		}
