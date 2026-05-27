@@ -222,7 +222,7 @@ function calculateBLEU(reference: string, candidate: string): number {
 
 **File:** `docs/afc_terminology_aws.csv`
 
-**AWS Resource:** `arn:aws:translate:eu-west-2:058264231147:terminology/afc-safeguarding/LATEST`
+**AWS Resource:** `arn:aws:translate:eu-west-2:<ACCOUNT_ID>:terminology/afc-safeguarding/LATEST`
 
 **Format:** CSV with headers `en,sq,ar,ta,fa,es,ur,fr,pt,so,tr`
 
