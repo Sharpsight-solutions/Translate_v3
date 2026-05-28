@@ -716,6 +716,28 @@ async function getS3Text(bucket: string, key: string): Promise<string> {
 	return (await response.Body?.transformToString("utf-8")) || "";
 }
 
+// ============================================================
+// Segment selection by terminology compliance (used as fallback)
+// ============================================================
+function selectByTermCompliance(
+	segA: string,
+	segB: string,
+	targetLang: string,
+	glossary: Map<string, Record<string, string>>
+): string {
+	let scoreA = 0;
+	let scoreB = 0;
+	for (const [_, translations] of glossary) {
+		const expectedTerm = translations[targetLang];
+		if (!expectedTerm) continue;
+		const expectedLower = expectedTerm.toLowerCase();
+		if (segA.toLowerCase().includes(expectedLower)) scoreA++;
+		if (segB.toLowerCase().includes(expectedLower)) scoreB++;
+	}
+	// If tied on terminology, prefer segment B (Bedrock — register-aware, more natural)
+	return scoreA > scoreB ? segA : segB;
+}
+
 export const handler = async (event: any) => {
 	// Event contains jobDetails from the Step Function
 	const jobDetails = event.jobDetails || event;
@@ -860,15 +882,17 @@ export const handler = async (event: any) => {
 						}
 
 						// Segment-level comparison with Titan Embeddings
+						// Compare ALL segments — cost is negligible (~$0.0004/segment)
+						// For a 250-sentence document this adds ~$0.10, well worth full coverage
 						const minSegments = Math.min(awsSegments.length, bedrockSegments.length, sourceSegments.length);
-						const maxSegmentsToCompare = Math.min(minSegments, 20); // Limit to 20 segments for cost
 						let contestedCount = 0;
 						let agreedCount = 0;
+						let unresolvedCount = 0;
 						const mergedSegments: string[] = [];
 						let usedEmbeddings = false;
 
 						try {
-							for (let i = 0; i < maxSegmentsToCompare; i++) {
+							for (let i = 0; i < minSegments; i++) {
 								const awsSeg = awsSegments[i];
 								const bedrockSeg = bedrockSegments[i];
 
@@ -919,19 +943,22 @@ Rules:
 - Output ONLY the correct translation of this segment, nothing else`;
 
 										const synthesised = await callClaude(synthesisPrompt, "Produce the correct translation.");
-										mergedSegments.push(synthesised || bedrockSeg);
+										mergedSegments.push(synthesised || selectByTermCompliance(awsSeg, bedrockSeg, langCode, glossary));
 									} catch (synthErr) {
-										// Fallback to Bedrock segment on synthesis failure
-										mergedSegments.push(bedrockSeg);
+										// Synthesis failed — select by terminology compliance (not blind Bedrock fallback)
+										// Both engines disagreed AND synthesis couldn't resolve it, so pick the one
+										// that at least uses correct domain terminology
+										unresolvedCount++;
+										mergedSegments.push(selectByTermCompliance(awsSeg, bedrockSeg, langCode, glossary));
 									}
 								}
 							}
 
-							// Append remaining segments from the preferred engine
+							// Append remaining segments from the preferred engine (beyond what both produced)
 							const preferBedrock = bedrockTermScore >= awsTermScore;
-							const remainingSource = preferBedrock ? bedrockSegments : awsSegments;
-							for (let i = maxSegmentsToCompare; i < remainingSource.length; i++) {
-								mergedSegments.push(remainingSource[i]);
+							const longerSource = awsSegments.length > bedrockSegments.length ? awsSegments : bedrockSegments;
+							for (let i = minSegments; i < longerSource.length; i++) {
+								mergedSegments.push(longerSource[i]);
 							}
 
 							// Assemble merged document
@@ -959,8 +986,9 @@ Rules:
 							bedrockSegments: bedrockSegments.length,
 							contestedSegments: contestedCount,
 							agreedSegments: agreedCount,
+							unresolvedSegments: unresolvedCount,
 							usedEmbeddings,
-							segmentsCompared: maxSegmentsToCompare,
+							totalSegmentsCompared: minSegments,
 						};
 
 						console.log(`Layer 3.4: AWS term: ${awsTermScore}, Bedrock term: ${bedrockTermScore}, contested: ${contestedCount}, agreed: ${agreedCount}`);
