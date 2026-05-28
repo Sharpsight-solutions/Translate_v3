@@ -152,6 +152,71 @@ function calculateBLEU(reference: string, candidate: string): number {
 }
 
 // ============================================================
+// chrF Score Calculation (character-level F-score)
+// Better than BLEU for morphologically rich languages (Arabic, Turkish, Tamil, Urdu)
+// Language-agnostic, more stable, better correlation with human judgement
+// ============================================================
+function calculateChrF(reference: string, candidate: string, maxN: number = 6, beta: number = 2): number {
+	const refChars = reference.toLowerCase();
+	const candChars = candidate.toLowerCase();
+
+	if (refChars.length === 0 || candChars.length === 0) return 0;
+
+	let totalPrecision = 0;
+	let totalRecall = 0;
+	let validOrders = 0;
+
+	for (let n = 1; n <= maxN; n++) {
+		// Extract character n-grams
+		const refNgrams = new Map<string, number>();
+		const candNgrams = new Map<string, number>();
+
+		for (let i = 0; i <= refChars.length - n; i++) {
+			const ngram = refChars.substring(i, i + n);
+			refNgrams.set(ngram, (refNgrams.get(ngram) || 0) + 1);
+		}
+
+		for (let i = 0; i <= candChars.length - n; i++) {
+			const ngram = candChars.substring(i, i + n);
+			candNgrams.set(ngram, (candNgrams.get(ngram) || 0) + 1);
+		}
+
+		// Calculate matches (clipped)
+		let matches = 0;
+		for (const [ngram, count] of candNgrams) {
+			const refCount = refNgrams.get(ngram) || 0;
+			matches += Math.min(count, refCount);
+		}
+
+		// Total n-grams in candidate and reference
+		let totalCand = 0;
+		for (const count of candNgrams.values()) totalCand += count;
+		let totalRef = 0;
+		for (const count of refNgrams.values()) totalRef += count;
+
+		if (totalCand > 0 && totalRef > 0) {
+			totalPrecision += matches / totalCand;
+			totalRecall += matches / totalRef;
+			validOrders++;
+		}
+	}
+
+	if (validOrders === 0) return 0;
+
+	// Average precision and recall across n-gram orders
+	const avgPrecision = totalPrecision / validOrders;
+	const avgRecall = totalRecall / validOrders;
+
+	if (avgPrecision === 0 && avgRecall === 0) return 0;
+
+	// F-score with beta weighting (beta=2 weights recall higher, standard for chrF)
+	const betaSq = beta * beta;
+	const fScore = ((1 + betaSq) * avgPrecision * avgRecall) / (betaSq * avgPrecision + avgRecall);
+
+	return parseFloat((fScore * 100).toFixed(1));
+}
+
+// ============================================================
 // LAYER 3.5: Artifact & Hallucination Detection (free, instant)
 // ============================================================
 interface Artifact {
@@ -406,6 +471,9 @@ async function backTranslationCheck(translatedText: string, originalText: string
 		// Calculate BLEU score (industry standard for MT evaluation)
 		const bleuScore = calculateBLEU(originalSample, backText);
 
+		// Calculate chrF score (better for morphologically rich languages)
+		const chrfScore = calculateChrF(originalSample, backText);
+
 		// Also calculate simple word overlap as secondary metric
 		const originalWords = new Set(originalSample.toLowerCase().split(/\s+/).filter(w => w.length > 3));
 		const backWords = new Set(backText.toLowerCase().split(/\s+/).filter(w => w.length > 3));
@@ -415,14 +483,16 @@ async function backTranslationCheck(translatedText: string, originalText: string
 		}
 		const wordOverlap = originalWords.size > 0 ? parseFloat(((overlap / originalWords.size) * 100).toFixed(1)) : 0;
 
-		// Pass if BLEU >= 15 OR word overlap >= 40%
+		// Pass if BLEU >= 15 OR chrF >= 40 OR word overlap >= 40%
 		// (BLEU is stricter — scores above 30 are considered good for MT)
-		const pass = bleuScore >= 15 || wordOverlap >= 40;
+		// (chrF is more forgiving for morphologically rich languages — 40+ is good)
+		const pass = bleuScore >= 15 || chrfScore >= 40 || wordOverlap >= 40;
 
 		return {
 			pass,
 			details: {
 				bleuScore,
+				chrfScore,
 				wordOverlap,
 				sampleLength: sample.length,
 			},
@@ -431,7 +501,7 @@ async function backTranslationCheck(translatedText: string, originalText: string
 		console.error("Back-translation failed:", err);
 		return {
 			pass: true, // Don't block on failure
-			details: { error: String(err), bleuScore: -1, wordOverlap: -1 },
+			details: { error: String(err), bleuScore: -1, chrfScore: -1, wordOverlap: -1 },
 		};
 	}
 }
@@ -1072,13 +1142,16 @@ Rules:
 								const finalBackText = finalBackTranslation.TranslatedText || "";
 								const originalSample = sourceText.substring(0, 5000);
 								const finalBleuScore = calculateBLEU(originalSample, finalBackText);
+								const finalChrfScore = calculateChrF(originalSample, finalBackText);
 
 								auditEntry.finalBleuScore = finalBleuScore;
-								auditEntry.qualityMetric = finalBleuScore; // This is the auditable score
-								console.log(`Layer 5 (Final BLEU) for ${langCode}: ${finalBleuScore}`);
+								auditEntry.finalChrfScore = finalChrfScore;
+								auditEntry.qualityMetric = finalBleuScore; // BLEU remains primary auditable score
+								console.log(`Layer 5 (Final) for ${langCode}: BLEU=${finalBleuScore}, chrF=${finalChrfScore}`);
 							} catch (bleuErr) {
-								console.error(`Final BLEU check failed for ${langCode}:`, bleuErr);
+								console.error(`Final BLEU/chrF check failed for ${langCode}:`, bleuErr);
 								auditEntry.finalBleuScore = -1;
+								auditEntry.finalChrfScore = -1;
 							}
 						} else if (!isStructuredDoc) {
 							// For non-corrected plain text, still run final BLEU on the original translation
@@ -1094,13 +1167,16 @@ Rules:
 								const backText = backResult.TranslatedText || "";
 								const originalSample = sourceText.substring(0, 5000);
 								const finalBleuScore = calculateBLEU(originalSample, backText);
+								const finalChrfScore = calculateChrF(originalSample, backText);
 
 								auditEntry.finalBleuScore = finalBleuScore;
+								auditEntry.finalChrfScore = finalChrfScore;
 								auditEntry.qualityMetric = finalBleuScore;
-								console.log(`Layer 5 (Final BLEU, no correction) for ${langCode}: ${finalBleuScore}`);
+								console.log(`Layer 5 (Final, no correction) for ${langCode}: BLEU=${finalBleuScore}, chrF=${finalChrfScore}`);
 							} catch (bleuErr) {
-								console.error(`Final BLEU check failed for ${langCode}:`, bleuErr);
+								console.error(`Final BLEU/chrF check failed for ${langCode}:`, bleuErr);
 								auditEntry.finalBleuScore = -1;
+								auditEntry.finalChrfScore = -1;
 							}
 						}
 					}
@@ -1120,19 +1196,25 @@ Rules:
 			? parseFloat((scoredEntries.reduce((sum, a) => sum + a.finalBleuScore, 0) / scoredEntries.length).toFixed(1))
 			: -1;
 
+		const chrfScoredEntries = auditTrail.filter(a => a.finalChrfScore > 0);
+		const overallChrfScore = chrfScoredEntries.length > 0
+			? parseFloat((chrfScoredEntries.reduce((sum, a) => sum + a.finalChrfScore, 0) / chrfScoredEntries.length).toFixed(1))
+			: -1;
+
 		// Check if any language flagged as needing review (artifact density too high)
 		const needsReviewEntries = auditTrail.filter(a => a.layers?.artifactDetection?.needsReview);
 		const jobNeedsReview = needsReviewEntries.length > 0;
 
 		const updateExpression = jobNeedsReview
-			? "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, qualityPipelineVersion = :pv, jobStatus = :js"
-			: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, qualityPipelineVersion = :pv";
+			? "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, chrfScore = :cs, qualityPipelineVersion = :pv, jobStatus = :js"
+			: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, chrfScore = :cs, qualityPipelineVersion = :pv";
 
 		const expressionValues: Record<string, any> = {
 			":qs": { N: String(overallBleuScore) },
 			":qa": { S: JSON.stringify(auditTrail) },
 			":qr": { S: new Date().toISOString() },
 			":bs": { N: String(overallBleuScore) },
+			":cs": { N: String(overallChrfScore) },
 			":pv": { S: "v2" },
 		};
 		if (jobNeedsReview) {
@@ -1148,7 +1230,7 @@ Rules:
 			})
 		);
 
-		console.log(`Quality review complete for job ${jobId}. BLEU: ${overallBleuScore}. AI Score: ${auditTrail[0]?.aiScore || 'N/A'}. Languages reviewed: ${scoredEntries.length}. Corrections applied: ${auditTrail.filter(a => a.correctionApplied).length}. Needs review: ${jobNeedsReview}`);
+		console.log(`Quality review complete for job ${jobId}. BLEU: ${overallBleuScore}. chrF: ${overallChrfScore}. AI Score: ${auditTrail[0]?.aiScore || 'N/A'}. Languages reviewed: ${scoredEntries.length}. Corrections applied: ${auditTrail.filter(a => a.correctionApplied).length}. Needs review: ${jobNeedsReview}`);
 
 		return {
 			statusCode: 200,
