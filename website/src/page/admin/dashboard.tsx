@@ -683,15 +683,15 @@ export default function AdminDashboard() {
 					</Container>
 
 					{/* Translation Quality Metrics */}
-					<Container header={<Header variant="h3">Translation Quality (v2 Pipeline)</Header>}>
+					<Container header={<Header variant="h3">Translation Quality</Header>}>
 						<ColumnLayout columns={3} variant="text-grid">
 							<div>
 								<Box variant="awsui-key-label">Avg BLEU Score</Box>
 								<Box variant="h2">
 									{(() => {
-										const scored = completedJobs.filter((j) => j.bleuScore && j.bleuScore > 0);
+										const scored = completedJobs.filter((j) => j.qualityScore != null && j.qualityScore > 0);
 										if (scored.length === 0) return "—";
-										const avg = scored.reduce((s, j) => s + (j.bleuScore || 0), 0) / scored.length;
+										const avg = scored.reduce((s, j) => s + (j.qualityScore || 0), 0) / scored.length;
 										return avg.toFixed(1);
 									})()}
 								</Box>
@@ -711,7 +711,7 @@ export default function AdminDashboard() {
 							<div>
 								<Box variant="awsui-key-label">QA Reviewed</Box>
 								<Box variant="h2">
-									{completedJobs.filter((j) => j.qualityReviewedAt).length}
+									{completedJobs.filter((j) => j.qualityScore != null && j.qualityScore > 0).length}
 								</Box>
 								<Box variant="small" color="text-body-secondary">
 									Of {completedJobs.length} completed
@@ -730,10 +730,10 @@ export default function AdminDashboard() {
 								<Box variant="awsui-key-label">Score Range</Box>
 								<Box variant="p">
 									{(() => {
-										const scored = completedJobs.filter((j) => j.bleuScore && j.bleuScore > 0);
+										const scored = completedJobs.filter((j) => j.qualityScore != null && j.qualityScore > 0);
 										if (scored.length === 0) return "—";
-										const min = Math.min(...scored.map(j => j.bleuScore!));
-										const max = Math.max(...scored.map(j => j.bleuScore!));
+										const min = Math.min(...scored.map(j => j.qualityScore!));
+										const max = Math.max(...scored.map(j => j.qualityScore!));
 										return `${min.toFixed(0)} – ${max.toFixed(0)}`;
 									})()}
 								</Box>
@@ -741,7 +741,7 @@ export default function AdminDashboard() {
 							<div>
 								<Box variant="awsui-key-label">v1 Legacy Jobs</Box>
 								<Box variant="p">
-									{completedJobs.filter((j) => !j.qualityPipelineVersion || j.qualityPipelineVersion === "v1").length}
+									{completedJobs.filter((j) => !j.qualityPipelineVersion || j.qualityPipelineVersion !== "v2").length}
 								</Box>
 							</div>
 						</ColumnLayout>
