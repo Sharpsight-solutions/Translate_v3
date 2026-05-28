@@ -720,7 +720,7 @@ export default function AdminDashboard() {
 							<div>
 								<Box variant="awsui-key-label">Needs Review</Box>
 								<Box variant="h2" color="text-status-warning">
-									{filteredJobs.filter((j) => j.jobStatus === "NEEDS_REVIEW").length}
+									{filteredJobs.filter((j: any) => j.qualityNeedsReview === true).length}
 								</Box>
 								<Box variant="small" color="text-body-secondary">
 									High artifact density

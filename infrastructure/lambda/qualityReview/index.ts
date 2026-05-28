@@ -770,6 +770,30 @@ export const handler = async (event: any) => {
 			return { statusCode: 200, body: "Skipped - source too short" };
 		}
 
+		// Detect if source is a structured document (.docx, .xlsx, .pptx)
+		// These files are binary XML — text-based quality layers cannot operate on them
+		const jobName = jobDetails.jobName || "";
+		const isSourceStructuredDoc = jobName.endsWith(".docx") || jobName.endsWith(".xlsx") || jobName.endsWith(".pptx") || s3PrefixToObject?.endsWith(".docx") || s3PrefixToObject?.endsWith(".xlsx") || s3PrefixToObject?.endsWith(".pptx");
+
+		if (isSourceStructuredDoc) {
+			console.log(`Source is a structured document (${jobName}). Text-based quality layers cannot operate on binary .docx content. Skipping text comparison — AWS Translate handles .docx natively with terminology applied.`);
+			// For structured docs, we still record that QA ran but skip text layers
+			await dynamodb.send(
+				new UpdateItemCommand({
+					TableName: JOB_TABLE_NAME,
+					Key: { id: { S: jobId } },
+					UpdateExpression: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, qualityPipelineVersion = :pv",
+					ExpressionAttributeValues: {
+						":qs": { N: "0" },
+						":qa": { S: JSON.stringify([{ note: "Structured document (.docx) — text-based quality layers skipped. AWS Translate applies terminology natively. Bedrock translation stored as companion plain text.", pipelineVersion: "v2", timestamp: new Date().toISOString() }]) },
+						":qr": { S: new Date().toISOString() },
+						":pv": { S: "v2" },
+					},
+				})
+			);
+			return { statusCode: 200, body: "Structured document — text layers skipped" };
+		}
+
 		// Get the translateKey map from DynamoDB to find output file paths
 		let translateKeyMap: Record<string, string> = {};
 		let bedrockTranslateKeyMap: Record<string, string> = {};
@@ -1233,9 +1257,9 @@ Rules:
 		const needsReviewEntries = auditTrail.filter(a => a.layers?.artifactDetection?.needsReview);
 		const jobNeedsReview = needsReviewEntries.length > 0;
 
-		const updateExpression = jobNeedsReview
-			? "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, chrfScore = :cs, qualityPipelineVersion = :pv, jobStatus = :js"
-			: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, chrfScore = :cs, qualityPipelineVersion = :pv";
+		// Store quality data — NEVER override jobStatus (would break downloads)
+		// Instead store needsReview as a separate flag for admin visibility
+		const updateExpression = "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, bleuScore = :bs, chrfScore = :cs, qualityPipelineVersion = :pv, qualityNeedsReview = :nr";
 
 		const expressionValues: Record<string, any> = {
 			":qs": { N: String(overallBleuScore) },
@@ -1244,10 +1268,8 @@ Rules:
 			":bs": { N: String(overallBleuScore) },
 			":cs": { N: String(overallChrfScore) },
 			":pv": { S: "v2" },
+			":nr": { BOOL: jobNeedsReview },
 		};
-		if (jobNeedsReview) {
-			expressionValues[":js"] = { S: "NEEDS_REVIEW" };
-		}
 
 		await dynamodb.send(
 			new UpdateItemCommand({
