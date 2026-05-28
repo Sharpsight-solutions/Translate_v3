@@ -13,6 +13,7 @@ import {
 	TranslateClient,
 	TranslateTextCommand,
 } from "@aws-sdk/client-translate";
+import mammoth from "mammoth";
 
 const s3 = new S3Client({});
 const dynamodb = new DynamoDBClient({});
@@ -716,6 +717,19 @@ async function getS3Text(bucket: string, key: string): Promise<string> {
 	return (await response.Body?.transformToString("utf-8")) || "";
 }
 
+async function getS3Bytes(bucket: string, key: string): Promise<Buffer> {
+	const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+	const bytes = await response.Body?.transformToByteArray();
+	return Buffer.from(bytes || []);
+}
+
+async function extractTextFromDocx(bucket: string, key: string): Promise<string> {
+	const bytes = await getS3Bytes(bucket, key);
+	if (bytes.length === 0) return "";
+	const result = await mammoth.extractRawText({ buffer: bytes });
+	return result.value;
+}
+
 // ============================================================
 // Segment selection by terminology compliance (used as fallback)
 // ============================================================
@@ -771,27 +785,36 @@ export const handler = async (event: any) => {
 		}
 
 		// Detect if source is a structured document (.docx, .xlsx, .pptx)
-		// These files are binary XML — text-based quality layers cannot operate on them
+		// For .docx files, extract plain text using mammoth so quality layers can operate
 		const jobName = jobDetails.jobName || "";
 		const isSourceStructuredDoc = jobName.endsWith(".docx") || jobName.endsWith(".xlsx") || jobName.endsWith(".pptx") || s3PrefixToObject?.endsWith(".docx") || s3PrefixToObject?.endsWith(".xlsx") || s3PrefixToObject?.endsWith(".pptx");
 
 		if (isSourceStructuredDoc) {
-			console.log(`Source is a structured document (${jobName}). Text-based quality layers cannot operate on binary .docx content. Skipping text comparison — AWS Translate handles .docx natively with terminology applied.`);
-			// For structured docs, we still record that QA ran but skip text layers
-			await dynamodb.send(
-				new UpdateItemCommand({
-					TableName: JOB_TABLE_NAME,
-					Key: { id: { S: jobId } },
-					UpdateExpression: "SET qualityScore = :qs, qualityAudit = :qa, qualityReviewedAt = :qr, qualityPipelineVersion = :pv",
-					ExpressionAttributeValues: {
-						":qs": { N: "0" },
-						":qa": { S: JSON.stringify([{ note: "Structured document (.docx) — text-based quality layers skipped. AWS Translate applies terminology natively. Bedrock translation stored as companion plain text.", pipelineVersion: "v2", timestamp: new Date().toISOString() }]) },
-						":qr": { S: new Date().toISOString() },
-						":pv": { S: "v2" },
-					},
-				})
-			);
-			return { statusCode: 200, body: "Structured document — text layers skipped" };
+			if (jobName.endsWith(".docx") || s3PrefixToObject?.endsWith(".docx")) {
+				// Extract text from .docx using mammoth
+				console.log(`Source is .docx — extracting text with mammoth for quality review`);
+				try {
+					sourceText = await extractTextFromDocx(CONTENT_BUCKET, s3PrefixToObject);
+					if (!sourceText || sourceText.length < 20) {
+						// Try upload path
+						const uploadPath = `${s3PrefixToJobId}/upload/${jobName}`;
+						sourceText = await extractTextFromDocx(CONTENT_BUCKET, uploadPath);
+					}
+					console.log(`Extracted ${sourceText.length} chars from source .docx`);
+				} catch (err) {
+					console.error("Failed to extract text from source .docx:", err);
+					return { statusCode: 200, body: "Could not extract text from .docx source" };
+				}
+			} else {
+				// .xlsx/.pptx — skip for now (not common in this workflow)
+				console.log(`Source is .xlsx/.pptx — skipping quality review`);
+				return { statusCode: 200, body: "Non-docx structured document — skipped" };
+			}
+		}
+
+		if (!sourceText || sourceText.length < 20) {
+			console.log("Source text too short for review, skipping");
+			return { statusCode: 200, body: "Skipped - source too short" };
 		}
 
 		// Get the translateKey map from DynamoDB to find output file paths
@@ -850,7 +873,13 @@ export const handler = async (event: any) => {
 
 			let translatedText = "";
 			try {
-				translatedText = await getS3Text(CONTENT_BUCKET, s3Path);
+				// For .docx outputs, extract text with mammoth; for plain text, read directly
+				if (s3Path.endsWith(".docx")) {
+					translatedText = await extractTextFromDocx(CONTENT_BUCKET, s3Path);
+					console.log(`Extracted ${translatedText.length} chars from translated .docx at ${s3Path}`);
+				} else {
+					translatedText = await getS3Text(CONTENT_BUCKET, s3Path);
+				}
 			} catch (err) {
 				console.log(`Could not read translation for ${langCode} at ${s3Path}`);
 				continue;

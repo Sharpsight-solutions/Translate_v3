@@ -154,6 +154,7 @@ export class dt_translationMain extends Construct {
 				REGISTER_PROFILES_KEY: "docs/register_profiles.json",
 			},
 			timeout: cdk.Duration.minutes(15),
+			bundlingNodeModules: ["mammoth"],
 		});
 		// Override memory for quality review Lambda (Titan Embeddings + large document processing)
 		const qualityReviewCfnFn = qualityReviewLambda.lambdaFunction.node.defaultChild as cdk.CfnResource;
