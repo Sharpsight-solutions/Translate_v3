@@ -12,7 +12,6 @@ import {
 	aws_stepfunctions as sfn,
 	aws_iam as iam,
 	aws_stepfunctions_tasks as tasks,
-	aws_s3_deployment as s3deploy,
 } from "aws-cdk-lib";
 import { dt_stepfunction } from "../../components/stepfunction";
 import { dt_lambda } from "../../components/lambda";
@@ -143,113 +142,6 @@ export class dt_translationMain extends Construct {
 			},
 		);
 
-		// STATE MACHINE | MAIN | TASKS | qualityReview
-		const qualityReviewLambda = new dt_lambda(this, "qualityReviewLambda", {
-			path: "lambda/qualityReview",
-			description: "Post-translation AI quality review and correction",
-			environment: {
-				JOB_TABLE_NAME: props.jobTable.tableName,
-				CONTENT_BUCKET: props.contentBucket.bucketName,
-				GLOSSARY_KEY: "docs/afc_terminology_aws.csv",
-				REGISTER_PROFILES_KEY: "docs/register_profiles.json",
-			},
-			timeout: cdk.Duration.minutes(15),
-			bundlingNodeModules: ["mammoth"],
-		});
-		// Override memory for quality review Lambda (Titan Embeddings + large document processing)
-		const qualityReviewCfnFn = qualityReviewLambda.lambdaFunction.node.defaultChild as cdk.CfnResource;
-		qualityReviewCfnFn.addPropertyOverride("MemorySize", 1024);
-		props.contentBucket.grantReadWrite(qualityReviewLambda.lambdaFunction);
-		props.jobTable.grantReadWriteData(qualityReviewLambda.lambdaFunction);
-		qualityReviewLambda.lambdaFunction.addToRolePolicy(
-			new iam.PolicyStatement({
-				actions: ["bedrock:InvokeModel", "translate:TranslateText"],
-				resources: ["*"],
-			})
-		);
-
-		// Deploy glossary CSV to content bucket for terminology verification
-		new s3deploy.BucketDeployment(this, "glossaryDeployment", {
-			sources: [s3deploy.Source.asset("../docs", { exclude: ["**", "!afc_terminology_aws.csv", "!register_profiles.json"] })],
-			destinationBucket: props.contentBucket,
-			destinationKeyPrefix: "docs",
-		});
-
-		// STATE MACHINE | MAIN | TASKS | bedrockTranslation (parallel engine)
-		const bedrockTranslationLambda = new dt_lambda(this, "bedrockTranslationLambda", {
-			path: "lambda/bedrockTranslation",
-			description: "Parallel translation via Claude 3.7 Sonnet with terminology and register awareness",
-			environment: {
-				JOB_TABLE_NAME: props.jobTable.tableName,
-				CONTENT_BUCKET: props.contentBucket.bucketName,
-				GLOSSARY_KEY: "docs/afc_terminology_aws.csv",
-				REGISTER_PROFILES_KEY: "docs/register_profiles.json",
-			},
-			timeout: cdk.Duration.minutes(15),
-		});
-		// Override default memory for this Lambda (needs more for large documents)
-		const bedrockTranslationCfnFn = bedrockTranslationLambda.lambdaFunction.node.defaultChild as cdk.CfnResource;
-		bedrockTranslationCfnFn.addPropertyOverride("MemorySize", 1024);
-		props.contentBucket.grantReadWrite(bedrockTranslationLambda.lambdaFunction);
-		props.jobTable.grantReadWriteData(bedrockTranslationLambda.lambdaFunction);
-		bedrockTranslationLambda.lambdaFunction.addToRolePolicy(
-			new iam.PolicyStatement({
-				actions: ["bedrock:InvokeModel"],
-				resources: ["*"],
-			})
-		);
-		NagSuppressions.addResourceSuppressions(
-			bedrockTranslationLambda.lambdaRole,
-			[
-				{
-					id: "AwsSolutions-IAM5",
-					reason: "Bedrock InvokeModel does not support resource-level permissions. S3 scoped to content bucket.",
-				},
-			],
-			true,
-		);
-
-		const invokeBedrockTranslation = new tasks.LambdaInvoke(
-			this,
-			"invokeBedrockTranslation",
-			{
-				lambdaFunction: bedrockTranslationLambda.lambdaFunction,
-				resultPath: sfn.JsonPath.DISCARD,
-				payload: sfn.TaskInput.fromObject({
-					jobDetails: sfn.JsonPath.objectAt("$.jobDetails"),
-				}),
-			},
-		);
-		// Catch errors so Bedrock translation failure doesn't block the pipeline
-		invokeBedrockTranslation.addCatch(new sfn.Pass(this, "bedrockTranslationFailed", {
-			resultPath: sfn.JsonPath.DISCARD,
-		}), {
-			errors: ["States.ALL"],
-			resultPath: sfn.JsonPath.DISCARD,
-		});
-		NagSuppressions.addResourceSuppressions(
-			qualityReviewLambda.lambdaRole,
-			[
-				{
-					id: "AwsSolutions-IAM5",
-					reason: "Bedrock InvokeModel does not support resource-level permissions. S3 scoped to content bucket.",
-				},
-			],
-			true,
-		);
-
-		const invokeQualityReview = new tasks.LambdaInvoke(
-			this,
-			"invokeQualityReview",
-			{
-				lambdaFunction: qualityReviewLambda.lambdaFunction,
-				resultPath: sfn.JsonPath.DISCARD,
-				payload: sfn.TaskInput.fromObject({
-					jobDetails: sfn.JsonPath.objectAt("$.jobDetails"),
-				}),
-			},
-		);
-
 		// STATE MACHINE | MAIN | DEF
 		if (startSfnPii && startSfnTag) {
 			this.sfnMain = new dt_stepfunction(
@@ -261,20 +153,14 @@ export class dt_translationMain extends Construct {
 					definition: unNestJobDetails
 						.next(mapJobDetails)
 						.next(
-							// PARALLEL: AWS Translate + Bedrock Translation + PII
 							new sfn.Parallel(this, "mainParallel", {
 								resultPath: "$.mainParallel",
 							})
-								// P1 SfnTranslate (AWS Translate)
 								.branch(startSfnTranslate)
-								// P2 SfnPii
-								.branch(startSfnPii)
-								// P3 Bedrock Translation (parallel engine — failure does not block)
-								.branch(invokeBedrockTranslation),
+								.branch(startSfnPii),
 						)
 						.next(startSfnTag)
-						.next(updateDbJobStatus)
-						.next(invokeQualityReview),
+						.next(updateDbJobStatus),
 				},
 			).StateMachine;
 		} else {
@@ -287,17 +173,12 @@ export class dt_translationMain extends Construct {
 					definition: unNestJobDetails
 						.next(mapJobDetails)
 						.next(
-							// PARALLEL: AWS Translate + Bedrock Translation
 							new sfn.Parallel(this, "mainParallel", {
 								resultPath: "$.mainParallel",
 							})
-								// P1 SfnTranslate (AWS Translate)
-								.branch(startSfnTranslate)
-								// P2 Bedrock Translation (parallel engine — failure does not block)
-								.branch(invokeBedrockTranslation),
+								.branch(startSfnTranslate),
 						)
-						.next(updateDbJobStatus)
-						.next(invokeQualityReview),
+						.next(updateDbJobStatus),
 				},
 			).StateMachine;
 		}

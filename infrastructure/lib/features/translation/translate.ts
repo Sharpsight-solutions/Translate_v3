@@ -127,6 +127,7 @@ export class dt_translationTranslate extends Construct {
 		);
 
 		// STATE MACHINE | TRANSLATE | TASKS | isCustomTerminologyAvailable
+		// Always apply afc-safeguarding terminology — it contains all target languages in one CSV
 		const isCustomTerminologyAvailable = new sfn.Pass(
 			this,
 			"isCustomTerminologyAvailable",
@@ -134,7 +135,7 @@ export class dt_translationTranslate extends Construct {
 				resultPath: "$.isCustomTerminologyAvailable",
 				parameters: {
 					"result.$":
-						"States.ArrayContains($.parseTerminologies.result, $.iterationDetails.languageTarget)",
+						"States.ArrayLength($.parseTerminologies.result)",
 				},
 			},
 		);
@@ -168,18 +169,14 @@ export class dt_translationTranslate extends Construct {
 		);
 
 		// STATE MACHINE | TRANSLATE | TASKS | setCustomTerminologyTrue - Set Translate custom terminology for language
+		// Always use "afc-safeguarding" — it contains all languages in one CSV file
 		const setCustomTerminologyTrue = new sfn.Pass(
 			this,
 			"setCustomTerminologyTrue",
 			{
 				resultPath: "$.iterationDetails.setCustomTerminology",
 				parameters: {
-					Payload: sfn.JsonPath.array(
-						sfn.JsonPath.format(
-							"{}",
-							sfn.JsonPath.stringAt("$.iterationDetails.languageTarget"),
-						),
-					),
+					Payload: ["afc-safeguarding"],
 				},
 			},
 		);
@@ -370,11 +367,12 @@ export class dt_translationTranslate extends Construct {
 						loopLangForTranslate.iterator(
 							updateDbPreTranslate.next(isCustomTerminologyAvailable).next(
 								// CHOICE - useCustomTerminologyAvailable
+								// If any terminologies exist in the account, apply afc-safeguarding
 								new sfn.Choice(this, "useCustomTerminologyAvailable")
 									.when(
-										sfn.Condition.booleanEquals(
+										sfn.Condition.numberGreaterThan(
 											"$.isCustomTerminologyAvailable.result",
-											true,
+											0,
 										),
 										setCustomTerminologyTrue,
 									)
